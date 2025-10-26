@@ -4,7 +4,6 @@ import {
   namespaceKey,
   type ElemContainer,
   type ElemId,
-  type ListNextVal,
   type ListNode,
   type MapNode,
   type RegNode,
