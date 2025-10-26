@@ -5,8 +5,8 @@ export type JsonPrimitive = string | number | boolean | null
 
 interface BaseOp {
   id: LamportTimestamp
-  deps: Set<string> // string-encoded LamportTimestamp ids
-  cursor: Cursor // path/key where the mutation applies
+  deps: Set<string>
+  cursor: Cursor
 }
 
 export interface OpAssignPrimitive extends BaseOp {
@@ -25,8 +25,12 @@ export interface OpInsertListPrimitive extends BaseOp {
   mut: { kind: 'insert_list_primitive'; after: string; value: JsonPrimitive }
 }
 
-export interface OpDelete extends BaseOp {
-  mut: { kind: 'delete' }
+export interface OpDeleteKey extends BaseOp {
+  mut: { kind: 'delete_key' }
+}
+
+export interface OpDeleteListElement extends BaseOp {
+  mut: { kind: 'delete_list_element'; elementId: string }
 }
 
 export type Operation =
@@ -34,7 +38,8 @@ export type Operation =
   | OpAssignEmptyMap
   | OpAssignEmptyList
   | OpInsertListPrimitive
-  | OpDelete
+  | OpDeleteKey
+  | OpDeleteListElement
 
 export function assertOpAssignPrimitive(
   op: Operation,
@@ -68,8 +73,16 @@ export function assertOpInsertListPrimitive(
   }
 }
 
-export function assertOpDelete(op: Operation): asserts op is OpDelete {
-  if (op.mut.kind !== 'delete') {
-    throw new Error(`expected delete, got ${op.mut.kind}`)
+export function assertOpDeleteKey(op: Operation): asserts op is OpDeleteKey {
+  if (op.mut.kind !== 'delete_key') {
+    throw new Error(`expected delete_key, got ${op.mut.kind}`)
+  }
+}
+
+export function assertOpDeleteListElement(
+  op: Operation,
+): asserts op is OpDeleteListElement {
+  if (op.mut.kind !== 'delete_list_element') {
+    throw new Error(`expected delete_list_element, got ${op.mut.kind}`)
   }
 }

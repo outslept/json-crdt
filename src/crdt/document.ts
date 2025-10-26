@@ -2,11 +2,15 @@ import {
   assertOpAssignEmptyList,
   assertOpAssignEmptyMap,
   assertOpAssignPrimitive,
+  assertOpDeleteKey,
+  assertOpDeleteListElement,
   assertOpInsertListPrimitive,
   type JsonPrimitive,
   type OpAssignEmptyList,
   type OpAssignEmptyMap,
   type OpAssignPrimitive,
+  type OpDeleteKey,
+  type OpDeleteListElement,
   type Operation,
   type OpInsertListPrimitive,
 } from './op.js'
@@ -97,8 +101,14 @@ export class JsonCrdtDocument {
         assertOpInsertListPrimitive(op)
         this.applyInsertListPrimitive(op)
         break
-      case 'delete':
-        throw new Error('todo')
+      case 'delete_key':
+        assertOpDeleteKey(op)
+        this.applyDeleteKey(op)
+        break
+      case 'delete_list_element':
+        assertOpDeleteListElement(op)
+        this.applyDeleteListElement(op)
+        break
       default: {
         const _exhaustive: never = op.mut
         throw new Error(`unsupported mutation ${_exhaustive as any}`)
@@ -170,9 +180,7 @@ export class JsonCrdtDocument {
   ): Operation {
     const id = this.clock.tick()
     const deps = new Set(this.processed)
-    if (afterElementId !== LIST_HEAD) {
-      deps.add(afterElementId)
-    }
+    if (afterElementId !== LIST_HEAD) deps.add(afterElementId)
     const op: Operation = {
       id,
       deps,
@@ -183,8 +191,33 @@ export class JsonCrdtDocument {
     return op
   }
 
+  applyLocalDeleteKey(cursor: Cursor): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    const op: Operation = { id, deps, cursor, mut: { kind: 'delete_key' } }
+    this.apply(op)
+    return op
+  }
+
+  applyLocalDeleteListElement(
+    cursorToList: Cursor,
+    elementId: string,
+  ): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    deps.add(elementId)
+    const op: Operation = {
+      id,
+      deps,
+      cursor: cursorToList,
+      mut: { kind: 'delete_list_element', elementId },
+    }
+    this.apply(op)
+    return op
+  }
+
   readRegisterValues(cursor: Cursor): Set<JsonPrimitive> | undefined {
-    const parent = this.descendMap(cursor.mapPath, /*presenceFor=*/ undefined)
+    const parent = this.descendMap(cursor.mapPath, undefined, false)
     if (!parent) return undefined
     const reg = parent.entries.get(ns('regT', cursor.key))
     if (!reg || reg.kind !== 'reg') return undefined
@@ -192,7 +225,7 @@ export class JsonCrdtDocument {
   }
 
   keysAt(mapPath: string[]): string[] {
-    const map = this.descendMap(mapPath, /*presenceFor=*/ undefined)
+    const map = this.descendMap(mapPath, undefined, false)
     if (!map) return []
     const out: string[] = []
     for (const [plainKey, pres] of map.presence.entries()) {
@@ -208,9 +241,7 @@ export class JsonCrdtDocument {
     let cur = list.next.get(LIST_HEAD)
     while (cur && cur !== LIST_TAIL) {
       const pres = list.presence.get(cur)
-      if (pres && pres.size > 0) {
-        ids.push(cur)
-      }
+      if (pres && pres.size > 0) ids.push(cur)
       cur = list.next.get(cur)
     }
     return ids
@@ -228,11 +259,9 @@ export class JsonCrdtDocument {
       const pres = list.presence.get(cur)
       if (pres && pres.size > 0) {
         const payload = list.elements.get(cur)
-        if (payload && payload.kind === 'reg') {
+        if (payload && payload.kind === 'reg')
           out.push(new Set(payload.values.values()))
-        } else {
-          out.push(new Set())
-        }
+        else out.push(new Set())
       }
       cur = list.next.get(cur)
     }
@@ -241,10 +270,8 @@ export class JsonCrdtDocument {
 
   private applyAssignPrimitive(op: OpAssignPrimitive): void {
     const idStr = tsToString(op.id)
-    const parent = this.descendMap(op.cursor.mapPath, idStr)
-    if (!parent) {
-      throw new Error('invalid cursor path for assign_primitive')
-    }
+    const parent = this.descendMap(op.cursor.mapPath, idStr, true)
+    if (!parent) throw new Error('invalid cursor path for assign_primitive')
 
     this.clearAtKey(parent, op.cursor.key, op.deps)
     this.addPresence(parent, op.cursor.key, idStr)
@@ -261,20 +288,16 @@ export class JsonCrdtDocument {
     }
 
     for (const priorId of op.deps) {
-      if ((reg as RegNode).values.has(priorId)) {
-        ;(reg as RegNode).values.delete(priorId)
-      }
+      if (reg.values.has(priorId)) reg.values.delete(priorId)
     }
 
-    ;(reg as RegNode).values.set(idStr, op.mut.value)
+    reg.values.set(idStr, op.mut.value)
   }
 
   private applyAssignEmptyMap(op: OpAssignEmptyMap): void {
     const idStr = tsToString(op.id)
-    const parent = this.descendMap(op.cursor.mapPath, idStr)
-    if (!parent) {
-      throw new Error('invalid cursor path for assign_empty_map')
-    }
+    const parent = this.descendMap(op.cursor.mapPath, idStr, true)
+    if (!parent) throw new Error('invalid cursor path for assign_empty_map')
 
     this.clearAtKey(parent, op.cursor.key, op.deps)
     this.addPresence(parent, op.cursor.key, idStr)
@@ -293,10 +316,8 @@ export class JsonCrdtDocument {
 
   private applyAssignEmptyList(op: OpAssignEmptyList): void {
     const idStr = tsToString(op.id)
-    const parent = this.descendMap(op.cursor.mapPath, idStr)
-    if (!parent) {
-      throw new Error('invalid cursor path for assign_empty_list')
-    }
+    const parent = this.descendMap(op.cursor.mapPath, idStr, true)
+    if (!parent) throw new Error('invalid cursor path for assign_empty_list')
 
     this.clearAtKey(parent, op.cursor.key, op.deps)
     this.addPresence(parent, op.cursor.key, idStr)
@@ -317,7 +338,7 @@ export class JsonCrdtDocument {
 
   private applyInsertListPrimitive(op: OpInsertListPrimitive): void {
     const idStr = tsToString(op.id)
-    const parent = this.descendMap(op.cursor.mapPath, idStr)
+    const parent = this.descendMap(op.cursor.mapPath, idStr, true)
     if (!parent)
       throw new Error('invalid cursor path for insert_list_primitive')
 
@@ -337,10 +358,7 @@ export class JsonCrdtDocument {
     }
 
     let at = prev
-    let next = list.next.get(at)
-    if (!next) {
-      next = LIST_TAIL
-    }
+    let next = list.next.get(at) ?? LIST_TAIL
     while (next !== LIST_TAIL && cmpTimestampStr(idStr, next) < 0) {
       at = next
       next = list.next.get(at) ?? LIST_TAIL
@@ -360,9 +378,41 @@ export class JsonCrdtDocument {
     list.elements.set(idStr, payload)
   }
 
+  private applyDeleteKey(op: OpDeleteKey): void {
+    const parent = this.descendMap(op.cursor.mapPath, undefined, false)
+    if (!parent) return
+
+    this.clearAtKey(parent, op.cursor.key, op.deps)
+  }
+
+  private applyDeleteListElement(op: OpDeleteListElement): void {
+    const parent = this.descendMap(op.cursor.mapPath, undefined, false)
+    if (!parent) return
+    const list = parent.entries.get(ns('listT', op.cursor.key))
+    if (!list || list.kind !== 'list') return
+
+    const idStr = tsToString(op.id)
+
+    const elemId = op.mut.elementId
+
+    const pres = list.presence.get(elemId)
+    if (pres) {
+      for (const d of op.deps) pres.delete(d)
+    }
+
+    const payload = list.elements.get(elemId)
+    if (payload) this.clearNode(payload, op.deps)
+
+    if (!list.presence.has(elemId)) list.presence.set(elemId, new Set())
+    this.clock.observe(op.id)
+
+    void idStr
+  }
+
   private descendMap(
     mapPath: string[],
     presenceForOpId: string | undefined,
+    createIfMissing: boolean = true,
   ): MapNode | undefined {
     let node: MapNode = this.root
 
@@ -374,6 +424,7 @@ export class JsonCrdtDocument {
       const mapNsKey = ns('mapT', key)
       let next = node.entries.get(mapNsKey)
       if (!next) {
+        if (!createIfMissing) return undefined
         next = { kind: 'map', entries: new Map(), presence: new Map() }
         node.entries.set(mapNsKey, next)
       } else if (next.kind !== 'map') {
@@ -394,11 +445,8 @@ export class JsonCrdtDocument {
     opIdStr: string,
   ): void {
     const existing = mapNode.presence.get(plainKey)
-    if (existing) {
-      existing.add(opIdStr)
-    } else {
-      mapNode.presence.set(plainKey, new Set([opIdStr]))
-    }
+    if (existing) existing.add(opIdStr)
+    else mapNode.presence.set(plainKey, new Set([opIdStr]))
   }
 
   private clearAtKey(
@@ -413,21 +461,15 @@ export class JsonCrdtDocument {
 
     const regKey = ns('regT', plainKey)
     const reg = parent.entries.get(regKey)
-    if (reg && reg.kind === 'reg') {
-      this.clearReg(reg, deps)
-    }
+    if (reg && reg.kind === 'reg') this.clearReg(reg, deps)
 
     const mapKey = ns('mapT', plainKey)
     const map = parent.entries.get(mapKey)
-    if (map && map.kind === 'map') {
-      this.clearMap(map, deps)
-    }
+    if (map && map.kind === 'map') this.clearMap(map, deps)
 
     const listKey = ns('listT', plainKey)
     const list = parent.entries.get(listKey)
-    if (list && list.kind === 'list') {
-      this.clearList(list, deps)
-    }
+    if (list && list.kind === 'list') this.clearList(list, deps)
   }
 
   private clearReg(reg: RegNode, deps: Set<string>): void {
@@ -474,7 +516,7 @@ export class JsonCrdtDocument {
     mapPath: string[],
     listKey: string,
   ): ListNode | undefined {
-    const parent = this.descendMap(mapPath, /*presenceFor=*/ undefined)
+    const parent = this.descendMap(mapPath, undefined, false)
     if (!parent) return undefined
     const list = parent.entries.get(ns('listT', listKey))
     if (!list || list.kind !== 'list') return undefined
