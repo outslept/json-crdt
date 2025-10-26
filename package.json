@@ -1,6 +1,7 @@
 {
   "name": "json-crdt",
   "version": "0.0.0",
+  "type": "module",
   "scripts": {
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
