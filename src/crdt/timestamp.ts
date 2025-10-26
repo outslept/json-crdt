@@ -1,8 +1,8 @@
 export type ReplicaID = string
 
 export interface LamportTimestamp {
-  c: number // counter
-  p: ReplicaID // replica id
+  c: number
+  p: ReplicaID
 }
 
 export function cmpTimestamp(a: LamportTimestamp, b: LamportTimestamp): number {

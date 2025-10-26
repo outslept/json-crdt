@@ -1,4 +1,7 @@
 export * from './timestamp.js'
 export * from './cursor.js'
 export * from './op.js'
+export * from './model.js'
+export * from './tree.js'
+export * from './handlers.js'
 export * from './document.js'

@@ -1,4 +1,26 @@
 import {
+  handleAssignElemEmptyList,
+  handleAssignElemEmptyMap,
+  handleAssignElemMapPrimitive,
+  handleAssignElemPrimitive,
+  handleAssignEmptyList,
+  handleAssignEmptyMap,
+  handleAssignPrimitive,
+  handleDeleteElemListElement,
+  handleDeleteElemMapKey,
+  handleDeleteKey,
+  handleDeleteListElement,
+  handleInsertElemListPrimitive,
+  handleInsertListPrimitive,
+} from './handlers.js'
+import {
+  LIST_HEAD,
+  LIST_TAIL,
+  namespaceKey,
+  type ListNode,
+  type MapNode,
+} from './model.js'
+import {
   assertOpAssignElemEmptyList,
   assertOpAssignElemEmptyMap,
   assertOpAssignElemMapPrimitive,
@@ -6,63 +28,37 @@ import {
   assertOpAssignEmptyList,
   assertOpAssignEmptyMap,
   assertOpAssignPrimitive,
+  assertOpDeleteElemListElement,
+  assertOpDeleteElemMapKey,
   assertOpDeleteKey,
   assertOpDeleteListElement,
+  assertOpInsertElemListPrimitive,
   assertOpInsertListPrimitive,
   fromWire,
+  toWire,
   type JsonPrimitive,
-  type OpAssignElemEmptyList,
-  type OpAssignElemEmptyMap,
-  type OpAssignElemMapPrimitive,
-  type OpAssignElemPrimitive,
-  type OpAssignEmptyList,
-  type OpAssignEmptyMap,
-  type OpAssignPrimitive,
-  type OpDeleteKey,
-  type OpDeleteListElement,
   type Operation,
-  type OpInsertListPrimitive,
   type WireOperation,
 } from './op.js'
 import {
   cmpTimestampStr,
   LamportClock,
+  tsFromString,
   tsToString,
   type ReplicaID,
 } from './timestamp.js'
+import { clearElementContainerCausally, getListNodeAt } from './tree.js'
 import type { Cursor } from './cursor.js'
 
-type Node = MapNode | RegNode | ListNode
+export type StateVector = Record<ReplicaID, number>
 
-interface MapNode {
-  kind: 'map'
-  entries: Map<string, Node>
-  presence: Map<string, Set<string>>
-}
-
-interface RegNode {
-  kind: 'reg'
-  values: Map<string, JsonPrimitive>
-}
-
-interface ElemContainer {
-  reg?: RegNode
-  map?: MapNode
-  list?: ListNode
-}
-
-interface ListNode {
-  kind: 'list'
-  next: Map<string, string>
-  presence: Map<string, Set<string>>
-  elements: Map<string, ElemContainer> // elementId -> typed payload container
-}
-
-const LIST_HEAD = '__head__'
-const LIST_TAIL = '__tail__'
-
-function ns(tag: 'mapT' | 'listT' | 'regT', key: string): string {
-  return `${tag}:${key}`
+export type Snapshot = {
+  version: number
+  replicaId: ReplicaID
+  clock: number
+  processedIds: string[]
+  stateVector: StateVector
+  ops: WireOperation[]
 }
 
 export class JsonCrdtDocument {
@@ -73,6 +69,8 @@ export class JsonCrdtDocument {
 
   private readonly pendingById: Map<string, Operation> = new Map()
   private draining = false
+
+  private readonly opLog: WireOperation[] = []
 
   constructor(replicaId: ReplicaID, counterStart = 0) {
     this.replicaId = replicaId
@@ -93,9 +91,58 @@ export class JsonCrdtDocument {
     return this.processed
   }
 
+  getStateVector(): StateVector {
+    const sv: StateVector = {}
+    for (const id of this.processed) {
+      const { c, p } = tsFromString(id)
+      sv[p] = Math.max(sv[p] ?? 0, c)
+    }
+    return sv
+  }
+
+  getPendingCount(): number {
+    return this.pendingById.size
+  }
+
+  getPendingIds(): string[] {
+    return Array.from(this.pendingById.keys()).toSorted()
+  }
+
   receiveWire(wire: WireOperation): void {
     const op = fromWire(wire)
     this.apply(op)
+  }
+
+  receiveWireBatch(wires: WireOperation[]): void {
+    for (const w of wires) this.receiveWire(w)
+  }
+
+  exportDeltaSince(peer: StateVector): WireOperation[] {
+    const out: WireOperation[] = []
+    for (const w of this.opLog) {
+      const max = peer[w.id.p] ?? 0
+      if (w.id.c > max) out.push(w)
+    }
+    return out
+  }
+
+  toSnapshot(): Snapshot {
+    return {
+      version: 1,
+      replicaId: this.replicaId,
+      clock: this.clock.current(),
+      processedIds: Array.from(this.processed),
+      stateVector: this.getStateVector(),
+      ops: this.opLog.slice(),
+    }
+  }
+  static fromSnapshot(
+    snap: Snapshot,
+    myReplicaId?: ReplicaID,
+  ): JsonCrdtDocument {
+    const doc = new JsonCrdtDocument(myReplicaId ?? snap.replicaId, snap.clock)
+    doc.receiveWireBatch(snap.ops)
+    return doc
   }
 
   apply(op: Operation): void {
@@ -113,43 +160,55 @@ export class JsonCrdtDocument {
     switch (op.mut.kind) {
       case 'assign_primitive':
         assertOpAssignPrimitive(op)
-        this.applyAssignPrimitive(op)
+        handleAssignPrimitive(this.root, op)
         break
       case 'assign_empty_map':
         assertOpAssignEmptyMap(op)
-        this.applyAssignEmptyMap(op)
+        handleAssignEmptyMap(this.root, op)
         break
       case 'assign_empty_list':
         assertOpAssignEmptyList(op)
-        this.applyAssignEmptyList(op)
+        handleAssignEmptyList(this.root, op)
         break
       case 'insert_list_primitive':
         assertOpInsertListPrimitive(op)
-        this.applyInsertListPrimitive(op)
+        handleInsertListPrimitive(this.root, op)
         break
       case 'delete_key':
         assertOpDeleteKey(op)
-        this.applyDeleteKey(op)
+        handleDeleteKey(this.root, op)
         break
       case 'delete_list_element':
         assertOpDeleteListElement(op)
-        this.applyDeleteListElement(op)
+        handleDeleteListElement(this.root, op)
         break
       case 'assign_elem_primitive':
         assertOpAssignElemPrimitive(op)
-        this.applyAssignElemPrimitive(op)
+        handleAssignElemPrimitive(this.root, op)
         break
       case 'assign_elem_empty_map':
         assertOpAssignElemEmptyMap(op)
-        this.applyAssignElemEmptyMap(op)
+        handleAssignElemEmptyMap(this.root, op)
         break
       case 'assign_elem_empty_list':
         assertOpAssignElemEmptyList(op)
-        this.applyAssignElemEmptyList(op)
+        handleAssignElemEmptyList(this.root, op)
         break
       case 'assign_elem_map_primitive':
         assertOpAssignElemMapPrimitive(op)
-        this.applyAssignElemMapPrimitive(op)
+        handleAssignElemMapPrimitive(this.root, op)
+        break
+      case 'insert_elem_list_primitive':
+        assertOpInsertElemListPrimitive(op)
+        handleInsertElemListPrimitive(this.root, op)
+        break
+      case 'delete_elem_list_element':
+        assertOpDeleteElemListElement(op)
+        handleDeleteElemListElement(this.root, op)
+        break
+      case 'delete_elem_map_key':
+        assertOpDeleteElemMapKey(op)
+        handleDeleteElemMapKey(this.root, op)
         break
       default: {
         const _exhaustive: never = op.mut
@@ -159,8 +218,8 @@ export class JsonCrdtDocument {
 
     this.processed.add(idStr)
     this.clock.observe(op.id)
+    this.opLog.push(toWire(op))
 
-    // Attempt to drain any now-ready pending ops
     if (!this.draining) this.drainPending()
   }
 
@@ -256,9 +315,7 @@ export class JsonCrdtDocument {
   ): Operation {
     const id = this.clock.tick()
     const deps = new Set(this.processed)
-    if (afterElementId !== LIST_HEAD) {
-      deps.add(afterElementId)
-    }
+    if (afterElementId !== LIST_HEAD) deps.add(afterElementId)
     const op: Operation = {
       id,
       deps,
@@ -283,7 +340,7 @@ export class JsonCrdtDocument {
   ): Operation {
     const id = this.clock.tick()
     const deps = new Set(this.processed)
-    deps.add(elementId) // depend on the insert of this element
+    deps.add(elementId)
     const op: Operation = {
       id,
       deps,
@@ -372,441 +429,218 @@ export class JsonCrdtDocument {
     return op
   }
 
-  readRegisterValues(cursor: Cursor): Set<JsonPrimitive> | undefined {
-    const parent = this.descendMap(this.root, cursor.mapPath, undefined, false)
-    if (!parent) return undefined
-    const reg = parent.entries.get(ns('regT', cursor.key))
-    if (!reg || reg.kind !== 'reg') return undefined
-    return new Set(reg.values.values())
+  applyLocalInsertElemListPrimitiveAtHead(
+    cursorToList: Cursor,
+    elementId: string,
+    value: JsonPrimitive,
+  ): Operation {
+    return this.applyLocalInsertElemListPrimitiveAfter(
+      cursorToList,
+      elementId,
+      LIST_HEAD,
+      value,
+    )
   }
 
-  keysAt(mapPath: string[]): string[] {
-    const map = this.descendMap(this.root, mapPath, undefined, false)
-    if (!map) return []
-    const out: string[] = []
-    for (const [plainKey, pres] of map.presence.entries()) {
-      if (pres.size > 0) out.push(plainKey)
+  applyLocalInsertElemListPrimitiveAfter(
+    cursorToList: Cursor,
+    elementId: string,
+    afterChildId: string,
+    value: JsonPrimitive,
+  ): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    deps.add(elementId)
+    if (afterChildId !== LIST_HEAD) deps.add(afterChildId)
+    const op: Operation = {
+      id,
+      deps,
+      cursor: cursorToList,
+      mut: {
+        kind: 'insert_elem_list_primitive',
+        elementId,
+        after: afterChildId,
+        value,
+      },
     }
-    return out.toSorted()
+    this.apply(op)
+    return op
   }
 
-  listElementIds(mapPath: string[], listKey: string): string[] {
-    const list = this.getListNode(mapPath, listKey)
-    if (!list) return []
-    const ids: string[] = []
-    let cur = list.next.get(LIST_HEAD)
-    while (cur && cur !== LIST_TAIL) {
-      const pres = list.presence.get(cur)
-      if (pres && pres.size > 0) {
-        ids.push(cur)
-      }
-      cur = list.next.get(cur)
+  applyLocalDeleteElemListElement(
+    cursorToList: Cursor,
+    elementId: string,
+    childElementId: string,
+  ): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    deps.add(elementId)
+    deps.add(childElementId)
+    const op: Operation = {
+      id,
+      deps,
+      cursor: cursorToList,
+      mut: { kind: 'delete_elem_list_element', elementId, childElementId },
     }
-    return ids
+    this.apply(op)
+    return op
   }
 
-  readListPrimitiveSets(
+  applyLocalDeleteElemMapKey(
+    cursorToList: Cursor,
+    elementId: string,
+    path: string[],
+    key: string,
+  ): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    deps.add(elementId)
+    const op: Operation = {
+      id,
+      deps,
+      cursor: cursorToList,
+      mut: { kind: 'delete_elem_map_key', elementId, path: [...path], key },
+    }
+    this.apply(op)
+    return op
+  }
+
+  listElementIdAt(
     mapPath: string[],
     listKey: string,
-  ): Array<Set<JsonPrimitive>> {
-    const list = this.getListNode(mapPath, listKey)
-    if (!list) return []
-    const out: Array<Set<JsonPrimitive>> = []
+    index: number,
+  ): string | undefined {
+    const list = getListNodeAt(this.root, mapPath, listKey)
+    if (!list || index < 0) return undefined
     let cur = list.next.get(LIST_HEAD)
+    let i = 0
     while (cur && cur !== LIST_TAIL) {
       const pres = list.presence.get(cur)
       if (pres && pres.size > 0) {
-        const container = list.elements.get(cur)
-        if (container && container.reg)
-          out.push(new Set(container.reg.values.values()))
-        else out.push(new Set())
+        if (i === index) return cur
+        i++
       }
       cur = list.next.get(cur)
     }
-    return out
+    return undefined
   }
 
-  private applyAssignPrimitive(op: OpAssignPrimitive): void {
-    const idStr = tsToString(op.id)
-    const parent = this.descendMap(this.root, op.cursor.mapPath, idStr, true)
-    if (!parent) throw new Error('invalid cursor path for assign_primitive')
-
-    this.clearAtKey(parent, op.cursor.key, op.deps)
-    this.addPresence(parent, op.cursor.key, idStr)
-
-    const regKey = ns('regT', op.cursor.key)
-    let reg = parent.entries.get(regKey)
-    if (!reg) {
-      reg = { kind: 'reg', values: new Map<string, JsonPrimitive>() }
-      parent.entries.set(regKey, reg)
-    } else if (reg.kind !== 'reg') {
-      throw new Error(
-        `type conflict at key ${op.cursor.key}: regT namespace occupied by ${reg.kind}`,
-      )
-    }
-
-    for (const priorId of op.deps) {
-      if ((reg as RegNode).values.has(priorId))
-        (reg as RegNode).values.delete(priorId)
-    }
-    ;(reg as RegNode).values.set(idStr, op.mut.value)
-  }
-
-  private applyAssignEmptyMap(op: OpAssignEmptyMap): void {
-    const idStr = tsToString(op.id)
-    const parent = this.descendMap(this.root, op.cursor.mapPath, idStr, true)
-    if (!parent) throw new Error('invalid cursor path for assign_empty_map')
-
-    this.clearAtKey(parent, op.cursor.key, op.deps)
-    this.addPresence(parent, op.cursor.key, idStr)
-
-    const mapKey = ns('mapT', op.cursor.key)
-    let child = parent.entries.get(mapKey)
-    if (!child) {
-      child = { kind: 'map', entries: new Map(), presence: new Map() }
-      parent.entries.set(mapKey, child)
-    } else if (child.kind !== 'map') {
-      throw new Error(
-        `type conflict at key ${op.cursor.key}: mapT namespace occupied by ${child.kind}`,
-      )
-    }
-  }
-
-  private applyAssignEmptyList(op: OpAssignEmptyList): void {
-    const idStr = tsToString(op.id)
-    const parent = this.descendMap(this.root, op.cursor.mapPath, idStr, true)
-    if (!parent) throw new Error('invalid cursor path for assign_empty_list')
-
-    this.clearAtKey(parent, op.cursor.key, op.deps)
-    this.addPresence(parent, op.cursor.key, idStr)
-
-    const listKey = ns('listT', op.cursor.key)
-    let child = parent.entries.get(listKey)
-    if (!child) {
-      const next = new Map<string, string>()
-      next.set(LIST_HEAD, LIST_TAIL)
-      child = { kind: 'list', next, presence: new Map(), elements: new Map() }
-      parent.entries.set(listKey, child)
-    } else if (child.kind !== 'list') {
-      throw new Error(
-        `type conflict at key ${op.cursor.key}: listT namespace occupied by ${child.kind}`,
-      )
-    }
-  }
-
-  private applyInsertListPrimitive(op: OpInsertListPrimitive): void {
-    const idStr = tsToString(op.id)
-    const parent = this.descendMap(this.root, op.cursor.mapPath, idStr, true)
-    if (!parent)
-      throw new Error('invalid cursor path for insert_list_primitive')
-
-    const listKey = ns('listT', op.cursor.key)
-    const list = parent.entries.get(listKey)
-    if (!list || list.kind !== 'list') {
-      throw new Error(
-        `list does not exist at key ${op.cursor.key}; assign_empty_list before inserting`,
-      )
-    }
-
-    const prev = op.mut.after === LIST_HEAD ? LIST_HEAD : op.mut.after
-    if (prev !== LIST_HEAD && !list.next.has(prev)) {
-      throw new Error(
-        `unknown predecessor element ${prev} for list ${op.cursor.key}`,
-      )
-    }
-
-    let at = prev
-    let next = list.next.get(at) ?? LIST_TAIL
-    while (next !== LIST_TAIL && cmpTimestampStr(idStr, next) < 0) {
-      at = next
-      next = list.next.get(at) ?? LIST_TAIL
-    }
-
-    list.next.set(at, idStr)
-    list.next.set(idStr, next)
-
-    const pres = list.presence.get(idStr)
-    if (pres) pres.add(idStr)
-    else list.presence.set(idStr, new Set([idStr]))
-
-    const container: ElemContainer = list.elements.get(idStr) ?? {}
-    container.reg = {
-      kind: 'reg',
-      values: new Map<string, JsonPrimitive>([[idStr, op.mut.value]]),
-    }
-    list.elements.set(idStr, container)
-  }
-
-  private applyDeleteKey(op: OpDeleteKey): void {
-    const parent = this.descendMap(
-      this.root,
-      op.cursor.mapPath,
-      undefined,
-      false,
-    )
-    if (!parent) return
-    this.clearAtKey(parent, op.cursor.key, op.deps)
-  }
-
-  private applyDeleteListElement(op: OpDeleteListElement): void {
-    const parent = this.descendMap(
-      this.root,
-      op.cursor.mapPath,
-      undefined,
-      false,
-    )
-    if (!parent) return
-    const list = parent.entries.get(ns('listT', op.cursor.key))
-    if (!list || list.kind !== 'list') return
-
-    const elemId = op.mut.elementId
-    const pres = list.presence.get(elemId)
-    if (pres) {
-      for (const d of op.deps) pres.delete(d)
-    }
-    const container = list.elements.get(elemId)
-    if (container) this.clearElemContainer(container, op.deps)
-    if (!list.presence.has(elemId)) list.presence.set(elemId, new Set())
-  }
-
-  private applyAssignElemPrimitive(op: OpAssignElemPrimitive): void {
-    const idStr = tsToString(op.id)
-    const list = this.getListNode(op.cursor.mapPath, op.cursor.key)
-    if (!list) throw new Error('list does not exist for assign_elem_primitive')
-    if (!list.next.has(op.mut.elementId)) {
-      throw new Error(
-        `unknown element ${op.mut.elementId} at list ${op.cursor.key}`,
-      )
-    }
-
-    const elPres = list.presence.get(op.mut.elementId)
-    if (elPres) elPres.add(idStr)
-    else list.presence.set(op.mut.elementId, new Set([idStr]))
-
-    const container: ElemContainer = list.elements.get(op.mut.elementId) ?? {}
-    if (!container.reg) container.reg = { kind: 'reg', values: new Map() }
-    for (const d of op.deps) container.reg.values.delete(d)
-    container.reg.values.set(idStr, op.mut.value)
-    list.elements.set(op.mut.elementId, container)
-  }
-
-  private applyAssignElemEmptyMap(op: OpAssignElemEmptyMap): void {
-    const idStr = tsToString(op.id)
-    const list = this.getListNode(op.cursor.mapPath, op.cursor.key)
-    if (!list) throw new Error('list does not exist for assign_elem_empty_map')
-    if (!list.next.has(op.mut.elementId)) {
-      throw new Error(
-        `unknown element ${op.mut.elementId} at list ${op.cursor.key}`,
-      )
-    }
-
-    const elPres = list.presence.get(op.mut.elementId)
-    if (elPres) elPres.add(idStr)
-    else list.presence.set(op.mut.elementId, new Set([idStr]))
-
-    const container: ElemContainer = list.elements.get(op.mut.elementId) ?? {}
-    if (!container.map)
-      container.map = { kind: 'map', entries: new Map(), presence: new Map() }
-    this.clearElemContainer(container, op.deps)
-    if (!container.map)
-      container.map = { kind: 'map', entries: new Map(), presence: new Map() }
-    list.elements.set(op.mut.elementId, container)
-  }
-
-  private applyAssignElemEmptyList(op: OpAssignElemEmptyList): void {
-    const idStr = tsToString(op.id)
-    const list = this.getListNode(op.cursor.mapPath, op.cursor.key)
-    if (!list) throw new Error('list does not exist for assign_elem_empty_list')
-    if (!list.next.has(op.mut.elementId)) {
-      throw new Error(
-        `unknown element ${op.mut.elementId} at list ${op.cursor.key}`,
-      )
-    }
-
-    const elPres = list.presence.get(op.mut.elementId)
-    if (elPres) elPres.add(idStr)
-    else list.presence.set(op.mut.elementId, new Set([idStr]))
-
-    const container: ElemContainer = list.elements.get(op.mut.elementId) ?? {}
-    if (!container.list) {
-      const next = new Map<string, string>()
-      next.set(LIST_HEAD, LIST_TAIL)
-      container.list = {
-        kind: 'list',
-        next,
-        presence: new Map(),
-        elements: new Map(),
-      }
-    }
-    this.clearElemContainer(container, op.deps)
-    if (!container.list) {
-      const next = new Map<string, string>()
-      next.set(LIST_HEAD, LIST_TAIL)
-      container.list = {
-        kind: 'list',
-        next,
-        presence: new Map(),
-        elements: new Map(),
-      }
-    }
-    list.elements.set(op.mut.elementId, container)
-  }
-
-  private applyAssignElemMapPrimitive(op: OpAssignElemMapPrimitive): void {
-    const idStr = tsToString(op.id)
-    const list = this.getListNode(op.cursor.mapPath, op.cursor.key)
-    if (!list)
-      throw new Error('list does not exist for assign_elem_map_primitive')
-    if (!list.next.has(op.mut.elementId)) {
-      throw new Error(
-        `unknown element ${op.mut.elementId} at list ${op.cursor.key}`,
-      )
-    }
-
-    const elPres = list.presence.get(op.mut.elementId)
-    if (elPres) elPres.add(idStr)
-    else list.presence.set(op.mut.elementId, new Set([idStr]))
-
-    const container: ElemContainer = list.elements.get(op.mut.elementId) ?? {}
-    if (!container.map)
-      container.map = { kind: 'map', entries: new Map(), presence: new Map() }
-
-    const parent = this.descendMap(container.map, op.mut.path, idStr, true)
-    if (!parent) throw new Error('invalid element map path')
-
-    this.clearAtKey(parent, op.mut.key, op.deps)
-    this.addPresence(parent, op.mut.key, idStr)
-
-    const regKey = ns('regT', op.mut.key)
-    let reg = parent.entries.get(regKey)
-    if (!reg) {
-      reg = { kind: 'reg', values: new Map<string, JsonPrimitive>() }
-      parent.entries.set(regKey, reg)
-    } else if (reg.kind !== 'reg') {
-      throw new Error(
-        `type conflict at element payload key ${op.mut.key}: regT occupied by ${reg.kind}`,
-      )
-    }
-    for (const d of op.deps) (reg as RegNode).values.delete(d)
-    ;(reg as RegNode).values.set(idStr, op.mut.value)
-
-    list.elements.set(op.mut.elementId, container)
-  }
-
-  /**
-   * Descend through or create nested map nodes from a given root.
-   * Optionally marks presence per traversed key and can avoid creation.
-   */
-  private descendMap(
-    root: MapNode,
+  listIndexOfElement(
     mapPath: string[],
-    presenceForOpId: string | undefined,
-    createIfMissing: boolean,
-  ): MapNode | undefined {
-    let node: MapNode = root
-    for (const key of mapPath) {
-      if (presenceForOpId) this.addPresence(node, key, presenceForOpId)
-      const mapNsKey = ns('mapT', key)
-      let next = node.entries.get(mapNsKey)
-      if (!next) {
-        if (!createIfMissing) return undefined
-        next = { kind: 'map', entries: new Map(), presence: new Map() }
-        node.entries.set(mapNsKey, next)
-      } else if (next.kind !== 'map') {
-        throw new Error(
-          `type conflict at ${key}: mapT namespace occupied by ${next.kind}`,
-        )
-      }
-      node = next as MapNode
-    }
-    return node
-  }
-
-  private addPresence(
-    mapNode: MapNode,
-    plainKey: string,
-    opIdStr: string,
-  ): void {
-    const existing = mapNode.presence.get(plainKey)
-    if (existing) existing.add(opIdStr)
-    else mapNode.presence.set(plainKey, new Set([opIdStr]))
-  }
-
-  private clearAtKey(
-    parent: MapNode,
-    plainKey: string,
-    deps: Set<string>,
-  ): void {
-    const pres = parent.presence.get(plainKey)
-    if (pres) {
-      for (const d of deps) pres.delete(d)
-    }
-
-    const regKey = ns('regT', plainKey)
-    const reg = parent.entries.get(regKey)
-    if (reg && reg.kind === 'reg') this.clearReg(reg, deps)
-
-    const mapKey = ns('mapT', plainKey)
-    const map = parent.entries.get(mapKey)
-    if (map && map.kind === 'map') this.clearMap(map, deps)
-
-    const listKey = ns('listT', plainKey)
-    const list = parent.entries.get(listKey)
-    if (list && list.kind === 'list') this.clearList(list, deps)
-  }
-
-  private clearReg(reg: RegNode, deps: Set<string>): void {
-    for (const d of deps) reg.values.delete(d)
-  }
-
-  private clearMap(map: MapNode, deps: Set<string>): void {
-    for (const [plainKey, pres] of map.presence.entries()) {
-      for (const d of deps) pres.delete(d)
-      this.clearAtKey(map, plainKey, deps)
-    }
-  }
-
-  private clearList(list: ListNode, deps: Set<string>): void {
+    listKey: string,
+    elementId: string,
+  ): number | undefined {
+    const list = getListNodeAt(this.root, mapPath, listKey)
+    if (!list) return undefined
     let cur = list.next.get(LIST_HEAD)
+    let i = 0
     while (cur && cur !== LIST_TAIL) {
       const pres = list.presence.get(cur)
-      if (pres) for (const d of deps) pres.delete(d)
+      if (pres && pres.size > 0) {
+        if (cur === elementId) return i
+        i++
+      }
+      cur = list.next.get(cur)
+    }
+    return undefined
+  }
+
+  compact(gcVector: StateVector): void {
+    this.compactMap(this.root, gcVector)
+  }
+
+  pruneOpLog(gcVector: StateVector): void {
+    let w = 0
+    for (let r = 0; r < this.opLog.length; r++) {
+      const op = this.opLog[r]
+      const cap = gcVector[op.id.p] ?? 0
+      if (op.id.c <= cap) continue
+      this.opLog[w++] = op
+    }
+    this.opLog.length = w
+  }
+
+  private compactMap(node: MapNode, gc: StateVector): void {
+    for (const [k, pres] of node.presence.entries()) {
+      for (const id of Array.from(pres)) {
+        const ts = tsFromString(id)
+        if ((gc[ts.p] ?? 0) >= ts.c) pres.delete(id)
+      }
+      this.compactAtKey(node, k, gc)
+      const compositeEmpty =
+        !node.entries.get(namespaceKey('regT', k)) &&
+        !node.entries.get(namespaceKey('mapT', k)) &&
+        !node.entries.get(namespaceKey('listT', k))
+      if (pres.size === 0 && compositeEmpty) node.presence.delete(k)
+    }
+  }
+
+  private compactAtKey(parent: MapNode, key: string, gc: StateVector): void {
+    const r = parent.entries.get(namespaceKey('regT', key))
+    if (r && r.kind === 'reg') {
+      for (const id of Array.from(r.values.keys())) {
+        const ts = tsFromString(id)
+        if ((gc[ts.p] ?? 0) >= ts.c) r.values.delete(id)
+      }
+      if (r.values.size === 0) parent.entries.delete(namespaceKey('regT', key))
+    }
+    const m = parent.entries.get(namespaceKey('mapT', key))
+    if (m && m.kind === 'map') {
+      this.compactMap(m, gc)
+      if (m.presence.size === 0 && m.entries.size === 0)
+        parent.entries.delete(namespaceKey('mapT', key))
+    }
+    const l = parent.entries.get(namespaceKey('listT', key))
+    if (l && l.kind === 'list') this.compactList(l, gc)
+  }
+
+  private compactList(list: ListNode, gc: StateVector): void {
+    let cur = list.next.get(LIST_HEAD)
+    const alive: string[] = []
+    while (cur && cur !== LIST_TAIL) {
+      const pres = list.presence.get(cur) ?? new Set<string>()
+      for (const id of Array.from(pres)) {
+        const ts = tsFromString(id)
+        if ((gc[ts.p] ?? 0) >= ts.c) pres.delete(id)
+      }
+      if (pres.size === 0) list.presence.set(cur, pres)
+
       const container = list.elements.get(cur)
-      if (container) this.clearElemContainer(container, deps)
+      if (container) clearElementContainerCausally(container, new Set())
+
+      const containerEmpty =
+        !container ||
+        ((container.reg?.values.size ?? 0) === 0 &&
+          (container.map?.entries.size ?? 0) === 0 &&
+          (container.map?.presence.size ?? 0) === 0 &&
+          (container.list?.elements.size ?? 0) === 0)
+
+      if (pres.size > 0 || !containerEmpty) alive.push(cur)
+      else list.elements.delete(cur)
+
       cur = list.next.get(cur)
     }
-  }
 
-  private clearElemContainer(
-    container: ElemContainer,
-    deps: Set<string>,
-  ): void {
-    if (container.reg) this.clearReg(container.reg, deps)
-    if (container.map) this.clearMap(container.map, deps)
-    if (container.list) this.clearList(container.list, deps)
-  }
+    const newNext = new Map<string, string>()
+    newNext.set(LIST_HEAD, LIST_TAIL)
+    let prev = LIST_HEAD
+    for (const id of alive) {
+      newNext.set(prev, id)
+      prev = id
+    }
+    newNext.set(prev, LIST_TAIL)
+    list.next = newNext
 
-  private getListNode(
-    mapPath: string[],
-    listKey: string,
-  ): ListNode | undefined {
-    const parent = this.descendMap(this.root, mapPath, undefined, false)
-    if (!parent) return undefined
-    const list = parent.entries.get(ns('listT', listKey))
-    if (!list || list.kind !== 'list') return undefined
-    return list
+    for (const key of Array.from(list.presence.keys())) {
+      if (key !== LIST_HEAD && key !== LIST_TAIL && !alive.includes(key)) {
+        const pres = list.presence.get(key)
+        if (pres && pres.size === 0) list.presence.delete(key)
+      }
+    }
   }
 
   debugView(): unknown {
     return this.debugMap(this.root)
-  }
-
-  getPendingCount(): number {
-    return this.pendingById.size
-  }
-
-  getPendingIds(): string[] {
-    return Array.from(this.pendingById.keys()).toSorted()
   }
 
   private debugMap(node: MapNode): unknown {
@@ -821,33 +655,23 @@ export class JsonCrdtDocument {
     for (const plainKey of keys) {
       const composite: Record<string, unknown> = {}
 
-      // reg projection
-      const regNode = node.entries.get(ns('regT', plainKey))
+      const regNode = node.entries.get(namespaceKey('regT', plainKey))
       if (regNode && regNode.kind === 'reg') {
-        const vals = Array.from(regNode.values.entries())
-        // sort by op id for stable output
-        vals.sort(([a], [b]) => cmpTimestampStr(a, b))
-        composite.reg = vals.map(([, v]) => v)
+        const pairs = Array.from(regNode.values.entries())
+        pairs.sort(([a], [b]) => cmpTimestampStr(a, b))
+        composite.reg = pairs.map(([, v]) => v)
       }
 
-      // map projection
-      const mapNode = node.entries.get(ns('mapT', plainKey))
-      if (mapNode && mapNode.kind === 'map') {
+      const mapNode = node.entries.get(namespaceKey('mapT', plainKey))
+      if (mapNode && mapNode.kind === 'map')
         composite.map = this.debugMap(mapNode)
-      }
 
-      // list projection
-      const listNode = node.entries.get(ns('listT', plainKey))
-      if (listNode && listNode.kind === 'list') {
+      const listNode = node.entries.get(namespaceKey('listT', plainKey))
+      if (listNode && listNode.kind === 'list')
         composite.list = this.debugList(listNode)
-      }
 
-      // Only assign keys that actually have visible content
-      if (Object.keys(composite).length > 0) {
-        out[plainKey] = composite
-      }
+      if (Object.keys(composite).length > 0) out[plainKey] = composite
     }
-
     return out
   }
 
@@ -859,24 +683,13 @@ export class JsonCrdtDocument {
       if (pres && pres.size > 0) {
         const container = list.elements.get(cur)
         const composite: Record<string, unknown> = {}
-
         if (container?.reg) {
-          const entries = Array.from(container.reg.values.entries())
-          const byId = Array.from(container.reg.values.entries()) as Array<
-            [string, JsonPrimitive]
-          >
+          const byId = Array.from(container.reg.values.entries())
           byId.sort(([a], [b]) => cmpTimestampStr(a, b))
           composite.reg = byId.map(([, v]) => v)
         }
-
-        if (container?.map) {
-          composite.map = this.debugMap(container.map)
-        }
-
-        if (container?.list) {
-          composite.list = this.debugList(container.list)
-        }
-
+        if (container?.map) composite.map = this.debugMap(container.map)
+        if (container?.list) composite.list = this.debugList(container.list)
         result.push({ id: cur, value: composite })
       }
       cur = list.next.get(cur)
