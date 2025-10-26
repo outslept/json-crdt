@@ -796,4 +796,91 @@ export class JsonCrdtDocument {
     if (!list || list.kind !== 'list') return undefined
     return list
   }
+
+  debugView(): unknown {
+    return this.debugMap(this.root)
+  }
+
+  getPendingCount(): number {
+    return this.pendingById.size
+  }
+
+  getPendingIds(): string[] {
+    return Array.from(this.pendingById.keys()).toSorted()
+  }
+
+  private debugMap(node: MapNode): unknown {
+    const out: Record<string, unknown> = {}
+    const keys = Array.from(node.presence.keys())
+      .filter((k) => {
+        const pres = node.presence.get(k)
+        return pres !== undefined && pres.size > 0
+      })
+      .toSorted()
+
+    for (const plainKey of keys) {
+      const composite: Record<string, unknown> = {}
+
+      // reg projection
+      const regNode = node.entries.get(ns('regT', plainKey))
+      if (regNode && regNode.kind === 'reg') {
+        const vals = Array.from(regNode.values.entries())
+        // sort by op id for stable output
+        vals.sort(([a], [b]) => cmpTimestampStr(a, b))
+        composite.reg = vals.map(([, v]) => v)
+      }
+
+      // map projection
+      const mapNode = node.entries.get(ns('mapT', plainKey))
+      if (mapNode && mapNode.kind === 'map') {
+        composite.map = this.debugMap(mapNode)
+      }
+
+      // list projection
+      const listNode = node.entries.get(ns('listT', plainKey))
+      if (listNode && listNode.kind === 'list') {
+        composite.list = this.debugList(listNode)
+      }
+
+      // Only assign keys that actually have visible content
+      if (Object.keys(composite).length > 0) {
+        out[plainKey] = composite
+      }
+    }
+
+    return out
+  }
+
+  private debugList(list: ListNode): unknown {
+    const result: Array<{ id: string; value: Record<string, unknown> }> = []
+    let cur = list.next.get(LIST_HEAD)
+    while (cur && cur !== LIST_TAIL) {
+      const pres = list.presence.get(cur)
+      if (pres && pres.size > 0) {
+        const container = list.elements.get(cur)
+        const composite: Record<string, unknown> = {}
+
+        if (container?.reg) {
+          const entries = Array.from(container.reg.values.entries())
+          const byId = Array.from(container.reg.values.entries()) as Array<
+            [string, JsonPrimitive]
+          >
+          byId.sort(([a], [b]) => cmpTimestampStr(a, b))
+          composite.reg = byId.map(([, v]) => v)
+        }
+
+        if (container?.map) {
+          composite.map = this.debugMap(container.map)
+        }
+
+        if (container?.list) {
+          composite.list = this.debugList(container.list)
+        }
+
+        result.push({ id: cur, value: composite })
+      }
+      cur = list.next.get(cur)
+    }
+    return result
+  }
 }
