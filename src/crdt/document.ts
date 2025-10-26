@@ -1,11 +1,22 @@
 import {
+  assertOpAssignEmptyList,
+  assertOpAssignEmptyMap,
+  assertOpAssignPrimitive,
+  assertOpInsertListPrimitive,
+  type JsonPrimitive,
+  type OpAssignEmptyList,
+  type OpAssignEmptyMap,
+  type OpAssignPrimitive,
+  type Operation,
+  type OpInsertListPrimitive,
+} from './op.js'
+import {
   cmpTimestampStr,
   LamportClock,
   tsToString,
   type ReplicaID,
 } from './timestamp.js'
 import type { Cursor } from './cursor.js'
-import type { JsonPrimitive, Mutation, Operation } from './op.js'
 
 type Node = MapNode | RegNode | ListNode
 
@@ -22,7 +33,7 @@ interface RegNode {
 
 interface ListNode {
   kind: 'list'
-  next: Map<string, string> // elementId -> next elementId; includes head -> ...
+  next: Map<string, string> // elementId -> next elementId; includes HEAD -> ...
   presence: Map<string, Set<string>> // elementId -> set of op ids asserting presence
   elements: Map<string, Node> // elementId -> element payload node (map/reg/list)
 }
@@ -71,15 +82,19 @@ export class JsonCrdtDocument {
 
     switch (op.mut.kind) {
       case 'assign_primitive':
+        assertOpAssignPrimitive(op)
         this.applyAssignPrimitive(op)
         break
       case 'assign_empty_map':
+        assertOpAssignEmptyMap(op)
         this.applyAssignEmptyMap(op)
         break
       case 'assign_empty_list':
+        assertOpAssignEmptyList(op)
         this.applyAssignEmptyList(op)
         break
       case 'insert_list_primitive':
+        assertOpInsertListPrimitive(op)
         this.applyInsertListPrimitive(op)
         break
       case 'delete':
@@ -101,8 +116,12 @@ export class JsonCrdtDocument {
   applyLocalAssignPrimitive(cursor: Cursor, value: JsonPrimitive): Operation {
     const id = this.clock.tick()
     const deps = new Set(this.processed)
-    const mut: Mutation = { kind: 'assign_primitive', value }
-    const op: Operation = { id, deps, cursor, mut }
+    const op: Operation = {
+      id,
+      deps,
+      cursor,
+      mut: { kind: 'assign_primitive', value },
+    }
     this.apply(op)
     return op
   }
@@ -110,8 +129,12 @@ export class JsonCrdtDocument {
   applyLocalAssignEmptyMap(cursor: Cursor): Operation {
     const id = this.clock.tick()
     const deps = new Set(this.processed)
-    const mut: Mutation = { kind: 'assign_empty_map' }
-    const op: Operation = { id, deps, cursor, mut }
+    const op: Operation = {
+      id,
+      deps,
+      cursor,
+      mut: { kind: 'assign_empty_map' },
+    }
     this.apply(op)
     return op
   }
@@ -119,8 +142,12 @@ export class JsonCrdtDocument {
   applyLocalAssignEmptyList(cursor: Cursor): Operation {
     const id = this.clock.tick()
     const deps = new Set(this.processed)
-    const mut: Mutation = { kind: 'assign_empty_list' }
-    const op: Operation = { id, deps, cursor, mut }
+    const op: Operation = {
+      id,
+      deps,
+      cursor,
+      mut: { kind: 'assign_empty_list' },
+    }
     this.apply(op)
     return op
   }
@@ -146,12 +173,12 @@ export class JsonCrdtDocument {
     if (afterElementId !== LIST_HEAD) {
       deps.add(afterElementId)
     }
-    const mut: Mutation = {
-      kind: 'insert_list_primitive',
-      after: afterElementId,
-      value,
+    const op: Operation = {
+      id,
+      deps,
+      cursor: cursorToList,
+      mut: { kind: 'insert_list_primitive', after: afterElementId, value },
     }
-    const op: Operation = { id, deps, cursor: cursorToList, mut }
     this.apply(op)
     return op
   }
@@ -212,9 +239,7 @@ export class JsonCrdtDocument {
     return out
   }
 
-  private applyAssignPrimitive(
-    op: Operation & { mut: { kind: 'assign_primitive'; value: JsonPrimitive } },
-  ): void {
+  private applyAssignPrimitive(op: OpAssignPrimitive): void {
     const idStr = tsToString(op.id)
     const parent = this.descendMap(op.cursor.mapPath, idStr)
     if (!parent) {
@@ -222,7 +247,6 @@ export class JsonCrdtDocument {
     }
 
     this.clearAtKey(parent, op.cursor.key, op.deps)
-
     this.addPresence(parent, op.cursor.key, idStr)
 
     const regKey = ns('regT', op.cursor.key)
@@ -237,17 +261,15 @@ export class JsonCrdtDocument {
     }
 
     for (const priorId of op.deps) {
-      if (reg.values.has(priorId)) {
-        reg.values.delete(priorId)
+      if ((reg as RegNode).values.has(priorId)) {
+        ;(reg as RegNode).values.delete(priorId)
       }
     }
 
-    reg.values.set(idStr, op.mut.value)
+    ;(reg as RegNode).values.set(idStr, op.mut.value)
   }
 
-  private applyAssignEmptyMap(
-    op: Operation & { mut: { kind: 'assign_empty_map' } },
-  ): void {
+  private applyAssignEmptyMap(op: OpAssignEmptyMap): void {
     const idStr = tsToString(op.id)
     const parent = this.descendMap(op.cursor.mapPath, idStr)
     if (!parent) {
@@ -255,7 +277,6 @@ export class JsonCrdtDocument {
     }
 
     this.clearAtKey(parent, op.cursor.key, op.deps)
-
     this.addPresence(parent, op.cursor.key, idStr)
 
     const mapKey = ns('mapT', op.cursor.key)
@@ -270,9 +291,7 @@ export class JsonCrdtDocument {
     }
   }
 
-  private applyAssignEmptyList(
-    op: Operation & { mut: { kind: 'assign_empty_list' } },
-  ): void {
+  private applyAssignEmptyList(op: OpAssignEmptyList): void {
     const idStr = tsToString(op.id)
     const parent = this.descendMap(op.cursor.mapPath, idStr)
     if (!parent) {
@@ -280,7 +299,6 @@ export class JsonCrdtDocument {
     }
 
     this.clearAtKey(parent, op.cursor.key, op.deps)
-
     this.addPresence(parent, op.cursor.key, idStr)
 
     const listKey = ns('listT', op.cursor.key)
@@ -297,15 +315,7 @@ export class JsonCrdtDocument {
     }
   }
 
-  private applyInsertListPrimitive(
-    op: Operation & {
-      mut: {
-        kind: 'insert_list_primitive'
-        after: string
-        value: JsonPrimitive
-      }
-    },
-  ): void {
+  private applyInsertListPrimitive(op: OpInsertListPrimitive): void {
     const idStr = tsToString(op.id)
     const parent = this.descendMap(op.cursor.mapPath, idStr)
     if (!parent)
