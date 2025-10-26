@@ -1,6 +1,7 @@
 {
   "name": "json-crdt",
   "version": "0.0.0",
+  "packageManager": "pnpm@10.15.0",
   "type": "module",
   "scripts": {
     "lint": "eslint .",
@@ -8,7 +9,6 @@
     "format:check": "prettier . --check",
     "format:fix": "prettier . --fix"
   },
-  "packageManager": "pnpm@10.15.0",
   "devDependencies": {
     "@prettier/plugin-oxc": "^0.0.4",
     "@sxzz/eslint-config": "^7.2.7",
