@@ -17,24 +17,13 @@ import {
   LIST_HEAD,
   LIST_TAIL,
   namespaceKey,
+  type ElemId,
   type ListNode,
   type MapNode,
 } from './model.js'
 import {
-  assertOpAssignElemEmptyList,
-  assertOpAssignElemEmptyMap,
-  assertOpAssignElemMapPrimitive,
-  assertOpAssignElemPrimitive,
-  assertOpAssignEmptyList,
-  assertOpAssignEmptyMap,
-  assertOpAssignPrimitive,
-  assertOpDeleteElemListElement,
-  assertOpDeleteElemMapKey,
-  assertOpDeleteKey,
-  assertOpDeleteListElement,
-  assertOpInsertElemListPrimitive,
-  assertOpInsertListPrimitive,
   fromWire,
+  isOp,
   toWire,
   type JsonPrimitive,
   type Operation,
@@ -46,8 +35,9 @@ import {
   tsFromString,
   tsToString,
   type ReplicaID,
+  type TimestampStr,
 } from './timestamp.js'
-import { clearElementContainerCausally, getListNodeAt } from './tree.js'
+import { getListNodeAt } from './tree.js'
 import type { Cursor } from './cursor.js'
 
 export type StateVector = Record<ReplicaID, number>
@@ -56,18 +46,26 @@ export type Snapshot = {
   version: number
   replicaId: ReplicaID
   clock: number
-  processedIds: string[]
+  processedIds: TimestampStr[]
   stateVector: StateVector
   ops: WireOperation[]
 }
 
+type DebugComposite = {
+  reg?: JsonPrimitive[]
+  map?: DebugMap
+  list?: DebugList
+}
+type DebugMap = Record<string, DebugComposite>
+type DebugList = Array<{ id: ElemId; value: DebugComposite }>
+
 export class JsonCrdtDocument {
   private readonly replicaId: ReplicaID
   private readonly clock: LamportClock
-  private readonly processed: Set<string>
+  private readonly processed: Set<TimestampStr>
   private readonly root: MapNode
 
-  private readonly pendingById: Map<string, Operation> = new Map()
+  private readonly pendingById: Map<TimestampStr, Operation> = new Map()
   private draining = false
 
   private readonly opLog: WireOperation[] = []
@@ -75,7 +73,7 @@ export class JsonCrdtDocument {
   constructor(replicaId: ReplicaID, counterStart = 0) {
     this.replicaId = replicaId
     this.clock = new LamportClock(replicaId, counterStart)
-    this.processed = new Set<string>()
+    this.processed = new Set<TimestampStr>()
     this.root = { kind: 'map', entries: new Map(), presence: new Map() }
   }
 
@@ -87,7 +85,7 @@ export class JsonCrdtDocument {
     return this.clock
   }
 
-  getProcessedIds(): ReadonlySet<string> {
+  getProcessedIds(): ReadonlySet<TimestampStr> {
     return this.processed
   }
 
@@ -104,7 +102,7 @@ export class JsonCrdtDocument {
     return this.pendingById.size
   }
 
-  getPendingIds(): string[] {
+  getPendingIds(): TimestampStr[] {
     return Array.from(this.pendingById.keys()).toSorted()
   }
 
@@ -136,11 +134,14 @@ export class JsonCrdtDocument {
       ops: this.opLog.slice(),
     }
   }
+
   static fromSnapshot(
     snap: Snapshot,
     myReplicaId?: ReplicaID,
   ): JsonCrdtDocument {
-    const doc = new JsonCrdtDocument(myReplicaId ?? snap.replicaId, snap.clock)
+    const reuseClock = !myReplicaId || myReplicaId === snap.replicaId
+    const start = reuseClock ? snap.clock : 0
+    const doc = new JsonCrdtDocument(myReplicaId ?? snap.replicaId, start)
     doc.receiveWireBatch(snap.ops)
     return doc
   }
@@ -159,61 +160,53 @@ export class JsonCrdtDocument {
 
     switch (op.mut.kind) {
       case 'assign_primitive':
-        assertOpAssignPrimitive(op)
-        handleAssignPrimitive(this.root, op)
+        if (isOp(op, 'assign_primitive')) handleAssignPrimitive(this.root, op)
         break
       case 'assign_empty_map':
-        assertOpAssignEmptyMap(op)
-        handleAssignEmptyMap(this.root, op)
+        if (isOp(op, 'assign_empty_map')) handleAssignEmptyMap(this.root, op)
         break
       case 'assign_empty_list':
-        assertOpAssignEmptyList(op)
-        handleAssignEmptyList(this.root, op)
+        if (isOp(op, 'assign_empty_list')) handleAssignEmptyList(this.root, op)
         break
       case 'insert_list_primitive':
-        assertOpInsertListPrimitive(op)
-        handleInsertListPrimitive(this.root, op)
+        if (isOp(op, 'insert_list_primitive'))
+          handleInsertListPrimitive(this.root, op)
         break
       case 'delete_key':
-        assertOpDeleteKey(op)
-        handleDeleteKey(this.root, op)
+        if (isOp(op, 'delete_key')) handleDeleteKey(this.root, op)
         break
       case 'delete_list_element':
-        assertOpDeleteListElement(op)
-        handleDeleteListElement(this.root, op)
+        if (isOp(op, 'delete_list_element'))
+          handleDeleteListElement(this.root, op)
         break
       case 'assign_elem_primitive':
-        assertOpAssignElemPrimitive(op)
-        handleAssignElemPrimitive(this.root, op)
+        if (isOp(op, 'assign_elem_primitive'))
+          handleAssignElemPrimitive(this.root, op)
         break
       case 'assign_elem_empty_map':
-        assertOpAssignElemEmptyMap(op)
-        handleAssignElemEmptyMap(this.root, op)
+        if (isOp(op, 'assign_elem_empty_map'))
+          handleAssignElemEmptyMap(this.root, op)
         break
       case 'assign_elem_empty_list':
-        assertOpAssignElemEmptyList(op)
-        handleAssignElemEmptyList(this.root, op)
+        if (isOp(op, 'assign_elem_empty_list'))
+          handleAssignElemEmptyList(this.root, op)
         break
       case 'assign_elem_map_primitive':
-        assertOpAssignElemMapPrimitive(op)
-        handleAssignElemMapPrimitive(this.root, op)
+        if (isOp(op, 'assign_elem_map_primitive'))
+          handleAssignElemMapPrimitive(this.root, op)
         break
       case 'insert_elem_list_primitive':
-        assertOpInsertElemListPrimitive(op)
-        handleInsertElemListPrimitive(this.root, op)
+        if (isOp(op, 'insert_elem_list_primitive'))
+          handleInsertElemListPrimitive(this.root, op)
         break
       case 'delete_elem_list_element':
-        assertOpDeleteElemListElement(op)
-        handleDeleteElemListElement(this.root, op)
+        if (isOp(op, 'delete_elem_list_element'))
+          handleDeleteElemListElement(this.root, op)
         break
       case 'delete_elem_map_key':
-        assertOpDeleteElemMapKey(op)
-        handleDeleteElemMapKey(this.root, op)
+        if (isOp(op, 'delete_elem_map_key'))
+          handleDeleteElemMapKey(this.root, op)
         break
-      default: {
-        const _exhaustive: never = op.mut
-        throw new Error(`unsupported mutation ${_exhaustive as any}`)
-      }
     }
 
     this.processed.add(idStr)
@@ -229,7 +222,7 @@ export class JsonCrdtDocument {
       let progressed = true
       while (progressed) {
         progressed = false
-        const readyIds: string[] = []
+        const readyIds: TimestampStr[] = []
         for (const [pid, pop] of this.pendingById) {
           let ready = true
           for (const dep of pop.deps) {
@@ -260,7 +253,7 @@ export class JsonCrdtDocument {
 
   applyLocalAssignPrimitive(cursor: Cursor, value: JsonPrimitive): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     const op: Operation = {
       id,
       deps,
@@ -273,7 +266,7 @@ export class JsonCrdtDocument {
 
   applyLocalAssignEmptyMap(cursor: Cursor): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     const op: Operation = {
       id,
       deps,
@@ -286,7 +279,7 @@ export class JsonCrdtDocument {
 
   applyLocalAssignEmptyList(cursor: Cursor): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     const op: Operation = {
       id,
       deps,
@@ -310,11 +303,11 @@ export class JsonCrdtDocument {
 
   applyLocalInsertListPrimitiveAfter(
     cursorToList: Cursor,
-    afterElementId: string,
+    afterElementId: typeof LIST_HEAD | ElemId,
     value: JsonPrimitive,
   ): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     if (afterElementId !== LIST_HEAD) deps.add(afterElementId)
     const op: Operation = {
       id,
@@ -328,7 +321,7 @@ export class JsonCrdtDocument {
 
   applyLocalDeleteKey(cursor: Cursor): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     const op: Operation = { id, deps, cursor, mut: { kind: 'delete_key' } }
     this.apply(op)
     return op
@@ -336,10 +329,10 @@ export class JsonCrdtDocument {
 
   applyLocalDeleteListElement(
     cursorToList: Cursor,
-    elementId: string,
+    elementId: ElemId,
   ): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     deps.add(elementId)
     const op: Operation = {
       id,
@@ -353,11 +346,11 @@ export class JsonCrdtDocument {
 
   applyLocalAssignElemPrimitive(
     cursorToList: Cursor,
-    elementId: string,
+    elementId: ElemId,
     value: JsonPrimitive,
   ): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     deps.add(elementId)
     const op: Operation = {
       id,
@@ -371,10 +364,10 @@ export class JsonCrdtDocument {
 
   applyLocalAssignElemEmptyMap(
     cursorToList: Cursor,
-    elementId: string,
+    elementId: ElemId,
   ): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     deps.add(elementId)
     const op: Operation = {
       id,
@@ -388,10 +381,10 @@ export class JsonCrdtDocument {
 
   applyLocalAssignElemEmptyList(
     cursorToList: Cursor,
-    elementId: string,
+    elementId: ElemId,
   ): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     deps.add(elementId)
     const op: Operation = {
       id,
@@ -405,13 +398,13 @@ export class JsonCrdtDocument {
 
   applyLocalAssignElemMapPrimitive(
     cursorToList: Cursor,
-    elementId: string,
+    elementId: ElemId,
     path: string[],
     key: string,
     value: JsonPrimitive,
   ): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     deps.add(elementId)
     const op: Operation = {
       id,
@@ -431,7 +424,7 @@ export class JsonCrdtDocument {
 
   applyLocalInsertElemListPrimitiveAtHead(
     cursorToList: Cursor,
-    elementId: string,
+    elementId: ElemId,
     value: JsonPrimitive,
   ): Operation {
     return this.applyLocalInsertElemListPrimitiveAfter(
@@ -444,12 +437,12 @@ export class JsonCrdtDocument {
 
   applyLocalInsertElemListPrimitiveAfter(
     cursorToList: Cursor,
-    elementId: string,
-    afterChildId: string,
+    elementId: ElemId,
+    afterChildId: typeof LIST_HEAD | ElemId,
     value: JsonPrimitive,
   ): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     deps.add(elementId)
     if (afterChildId !== LIST_HEAD) deps.add(afterChildId)
     const op: Operation = {
@@ -469,11 +462,11 @@ export class JsonCrdtDocument {
 
   applyLocalDeleteElemListElement(
     cursorToList: Cursor,
-    elementId: string,
-    childElementId: string,
+    elementId: ElemId,
+    childElementId: ElemId,
   ): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     deps.add(elementId)
     deps.add(childElementId)
     const op: Operation = {
@@ -488,12 +481,12 @@ export class JsonCrdtDocument {
 
   applyLocalDeleteElemMapKey(
     cursorToList: Cursor,
-    elementId: string,
+    elementId: ElemId,
     path: string[],
     key: string,
   ): Operation {
     const id = this.clock.tick()
-    const deps = new Set(this.processed)
+    const deps = new Set<TimestampStr>(this.processed)
     deps.add(elementId)
     const op: Operation = {
       id,
@@ -509,7 +502,7 @@ export class JsonCrdtDocument {
     mapPath: string[],
     listKey: string,
     index: number,
-  ): string | undefined {
+  ): ElemId | undefined {
     const list = getListNodeAt(this.root, mapPath, listKey)
     if (!list || index < 0) return undefined
     let cur = list.next.get(LIST_HEAD)
@@ -528,7 +521,7 @@ export class JsonCrdtDocument {
   listIndexOfElement(
     mapPath: string[],
     listKey: string,
-    elementId: string,
+    elementId: ElemId,
   ): number | undefined {
     const list = getListNodeAt(this.root, mapPath, listKey)
     if (!list) return undefined
@@ -553,6 +546,7 @@ export class JsonCrdtDocument {
     let w = 0
     for (let r = 0; r < this.opLog.length; r++) {
       const op = this.opLog[r]
+      if (!op) continue
       const cap = gcVector[op.id.p] ?? 0
       if (op.id.c <= cap) continue
       this.opLog[w++] = op
@@ -595,19 +589,18 @@ export class JsonCrdtDocument {
   }
 
   private compactList(list: ListNode, gc: StateVector): void {
+    const alive: ElemId[] = []
     let cur = list.next.get(LIST_HEAD)
-    const alive: string[] = []
     while (cur && cur !== LIST_TAIL) {
-      const pres = list.presence.get(cur) ?? new Set<string>()
-      for (const id of Array.from(pres)) {
-        const ts = tsFromString(id)
-        if ((gc[ts.p] ?? 0) >= ts.c) pres.delete(id)
+      const id = cur
+      const pres = list.presence.get(id) ?? new Set<TimestampStr>()
+      for (const pid of Array.from(pres)) {
+        const ts = tsFromString(pid)
+        if ((gc[ts.p] ?? 0) >= ts.c) pres.delete(pid)
       }
-      if (pres.size === 0) list.presence.set(cur, pres)
+      if (pres.size === 0) list.presence.set(id, pres)
 
-      const container = list.elements.get(cur)
-      if (container) clearElementContainerCausally(container, new Set())
-
+      const container = list.elements.get(id)
       const containerEmpty =
         !container ||
         ((container.reg?.values.size ?? 0) === 0 &&
@@ -615,15 +608,18 @@ export class JsonCrdtDocument {
           (container.map?.presence.size ?? 0) === 0 &&
           (container.list?.elements.size ?? 0) === 0)
 
-      if (pres.size > 0 || !containerEmpty) alive.push(cur)
-      else list.elements.delete(cur)
+      if (pres.size > 0 || !containerEmpty) alive.push(id)
+      else list.elements.delete(id)
 
-      cur = list.next.get(cur)
+      cur = list.next.get(id)
     }
 
-    const newNext = new Map<string, string>()
+    const newNext = new Map<
+      typeof LIST_HEAD | ElemId,
+      typeof LIST_TAIL | ElemId
+    >()
     newNext.set(LIST_HEAD, LIST_TAIL)
-    let prev = LIST_HEAD
+    let prev: typeof LIST_HEAD | ElemId = LIST_HEAD
     for (const id of alive) {
       newNext.set(prev, id)
       prev = id
@@ -632,19 +628,19 @@ export class JsonCrdtDocument {
     list.next = newNext
 
     for (const key of Array.from(list.presence.keys())) {
-      if (key !== LIST_HEAD && key !== LIST_TAIL && !alive.includes(key)) {
+      if (!alive.includes(key)) {
         const pres = list.presence.get(key)
         if (pres && pres.size === 0) list.presence.delete(key)
       }
     }
   }
 
-  debugView(): unknown {
+  debugView(): DebugMap {
     return this.debugMap(this.root)
   }
 
-  private debugMap(node: MapNode): unknown {
-    const out: Record<string, unknown> = {}
+  private debugMap(node: MapNode): DebugMap {
+    const out: Record<string, DebugComposite> = {}
     const keys = Array.from(node.presence.keys())
       .filter((k) => {
         const pres = node.presence.get(k)
@@ -653,7 +649,7 @@ export class JsonCrdtDocument {
       .toSorted()
 
     for (const plainKey of keys) {
-      const composite: Record<string, unknown> = {}
+      const composite: DebugComposite = {}
 
       const regNode = node.entries.get(namespaceKey('regT', plainKey))
       if (regNode && regNode.kind === 'reg') {
@@ -675,14 +671,15 @@ export class JsonCrdtDocument {
     return out
   }
 
-  private debugList(list: ListNode): unknown {
-    const result: Array<{ id: string; value: Record<string, unknown> }> = []
+  private debugList(list: ListNode): DebugList {
+    const result: Array<{ id: ElemId; value: DebugComposite }> = []
     let cur = list.next.get(LIST_HEAD)
     while (cur && cur !== LIST_TAIL) {
-      const pres = list.presence.get(cur)
+      const id = cur
+      const pres = list.presence.get(id)
       if (pres && pres.size > 0) {
-        const container = list.elements.get(cur)
-        const composite: Record<string, unknown> = {}
+        const container = list.elements.get(id)
+        const composite: DebugComposite = {}
         if (container?.reg) {
           const byId = Array.from(container.reg.values.entries())
           byId.sort(([a], [b]) => cmpTimestampStr(a, b))
@@ -690,9 +687,9 @@ export class JsonCrdtDocument {
         }
         if (container?.map) composite.map = this.debugMap(container.map)
         if (container?.list) composite.list = this.debugList(container.list)
-        result.push({ id: cur, value: composite })
+        result.push({ id, value: composite })
       }
-      cur = list.next.get(cur)
+      cur = list.next.get(id)
     }
     return result
   }

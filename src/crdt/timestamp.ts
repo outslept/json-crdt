@@ -5,6 +5,8 @@ export interface LamportTimestamp {
   p: ReplicaID
 }
 
+export type TimestampStr = `${number}:${ReplicaID}`
+
 export function cmpTimestamp(a: LamportTimestamp, b: LamportTimestamp): number {
   if (a.c < b.c) return -1
   if (a.c > b.c) return 1
@@ -13,7 +15,7 @@ export function cmpTimestamp(a: LamportTimestamp, b: LamportTimestamp): number {
   return 0
 }
 
-export function tsToString(ts: LamportTimestamp): string {
+export function tsToString(ts: LamportTimestamp): TimestampStr {
   return `${ts.c}:${ts.p}`
 }
 
@@ -28,7 +30,7 @@ export function tsFromString(s: string): LamportTimestamp {
   return { c, p: pPart }
 }
 
-export function cmpTimestampStr(a: string, b: string): number {
+export function cmpTimestampStr(a: TimestampStr, b: TimestampStr): number {
   return cmpTimestamp(tsFromString(a), tsFromString(b))
 }
 

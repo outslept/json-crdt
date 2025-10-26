@@ -3,6 +3,9 @@ import {
   LIST_TAIL,
   namespaceKey,
   type ElemContainer,
+  type ElemId,
+  type ListNextKey,
+  type ListNextVal,
   type MapNode,
   type RegNode,
 } from './model.js'
@@ -15,7 +18,6 @@ import {
   getListNodeAt,
 } from './tree.js'
 import type {
-  JsonPrimitive,
   OpAssignElemEmptyList,
   OpAssignElemEmptyMap,
   OpAssignElemMapPrimitive,
@@ -30,6 +32,10 @@ import type {
   OpInsertElemListPrimitive,
   OpInsertListPrimitive,
 } from './op.js'
+
+function isElemId(x: ListNextVal): x is ElemId {
+  return x !== LIST_TAIL
+}
 
 export function handleAssignPrimitive(
   root: MapNode,
@@ -53,7 +59,7 @@ export function handleAssignPrimitive(
     }
     regNode = existing
   } else {
-    regNode = { kind: 'reg', values: new Map<string, JsonPrimitive>() }
+    regNode = { kind: 'reg', values: new Map() }
     parent.entries.set(regKey, regNode)
   }
 
@@ -101,7 +107,7 @@ export function handleAssignEmptyList(
   const listKey = namespaceKey('listT', op.cursor.key)
   const existing = parent.entries.get(listKey)
   if (!existing) {
-    const next = new Map<string, string>()
+    const next = new Map<ListNextKey, ListNextVal>()
     next.set(LIST_HEAD, LIST_TAIL)
     parent.entries.set(listKey, {
       kind: 'list',
@@ -132,16 +138,17 @@ export function handleInsertListPrimitive(
     )
   }
 
-  const prev = op.mut.after === LIST_HEAD ? LIST_HEAD : op.mut.after
+  const prev: ListNextKey =
+    op.mut.after === LIST_HEAD ? LIST_HEAD : op.mut.after
   if (prev !== LIST_HEAD && !list.next.has(prev)) {
     throw new Error(
       `unknown predecessor element ${prev} for list ${op.cursor.key}`,
     )
   }
 
-  let at = prev
-  let next = list.next.get(at) ?? LIST_TAIL
-  while (next !== LIST_TAIL && cmpTimestampStr(idStr, next) < 0) {
+  let at: ListNextKey = prev
+  let next: ListNextVal = list.next.get(at) ?? LIST_TAIL
+  while (isElemId(next) && cmpTimestampStr(idStr, next) < 0) {
     at = next
     next = list.next.get(at) ?? LIST_TAIL
   }
@@ -154,10 +161,7 @@ export function handleInsertListPrimitive(
   else list.presence.set(idStr, new Set([idStr]))
 
   const container: ElemContainer = list.elements.get(idStr) ?? {}
-  container.reg = {
-    kind: 'reg',
-    values: new Map<string, JsonPrimitive>([[idStr, op.mut.value]]),
-  }
+  container.reg = { kind: 'reg', values: new Map([[idStr, op.mut.value]]) }
   list.elements.set(idStr, container)
 }
 
@@ -253,7 +257,7 @@ export function handleAssignElemEmptyList(
 
   const container: ElemContainer = list.elements.get(op.mut.elementId) ?? {}
   if (!container.list) {
-    const next = new Map<string, string>()
+    const next = new Map<ListNextKey, ListNextVal>()
     next.set(LIST_HEAD, LIST_TAIL)
     container.list = {
       kind: 'list',
@@ -264,7 +268,7 @@ export function handleAssignElemEmptyList(
   }
   clearElementContainerCausally(container, op.deps)
   if (!container.list) {
-    const next = new Map<string, string>()
+    const next = new Map<ListNextKey, ListNextVal>()
     next.set(LIST_HEAD, LIST_TAIL)
     container.list = {
       kind: 'list',
@@ -314,7 +318,7 @@ export function handleAssignElemMapPrimitive(
     }
     regNode = existing
   } else {
-    regNode = { kind: 'reg', values: new Map<string, JsonPrimitive>() }
+    regNode = { kind: 'reg', values: new Map() }
     parent.entries.set(regKey, regNode)
   }
   for (const d of op.deps) regNode.values.delete(d)
@@ -344,7 +348,7 @@ export function handleInsertElemListPrimitive(
   const container: ElemContainer =
     outerList.elements.get(op.mut.elementId) ?? {}
   if (!container.list) {
-    const next = new Map<string, string>()
+    const next = new Map<ListNextKey, ListNextVal>()
     next.set(LIST_HEAD, LIST_TAIL)
     container.list = {
       kind: 'list',
@@ -355,12 +359,13 @@ export function handleInsertElemListPrimitive(
   }
   const inner = container.list
 
-  const prev = op.mut.after === LIST_HEAD ? LIST_HEAD : op.mut.after
+  const prev: ListNextKey =
+    op.mut.after === LIST_HEAD ? LIST_HEAD : op.mut.after
   if (prev !== LIST_HEAD && !inner.next.has(prev))
     throw new Error(`unknown inner predecessor ${prev}`)
-  let at = prev
-  let next = inner.next.get(at) ?? LIST_TAIL
-  while (next !== LIST_TAIL && cmpTimestampStr(idStr, next) < 0) {
+  let at: ListNextKey = prev
+  let next: ListNextVal = inner.next.get(at) ?? LIST_TAIL
+  while (isElemId(next) && cmpTimestampStr(idStr, next) < 0) {
     at = next
     next = inner.next.get(at) ?? LIST_TAIL
   }
@@ -372,10 +377,7 @@ export function handleInsertElemListPrimitive(
   else inner.presence.set(idStr, new Set([idStr]))
 
   inner.elements.set(idStr, {
-    reg: {
-      kind: 'reg',
-      values: new Map<string, JsonPrimitive>([[idStr, op.mut.value]]),
-    },
+    reg: { kind: 'reg', values: new Map([[idStr, op.mut.value]]) },
   })
   outerList.elements.set(op.mut.elementId, container)
 }

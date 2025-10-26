@@ -3,19 +3,18 @@ import {
   LIST_TAIL,
   namespaceKey,
   type ElemContainer,
+  type ElemId,
+  type ListNextVal,
   type ListNode,
   type MapNode,
   type RegNode,
 } from './model.js'
+import type { TimestampStr } from './timestamp.js'
 
-/**
- * Descend through (and optionally create) nested map branches from a root.
- * Optionally marks presence for each traversed key under the provided op id.
- */
 export function descendMap(
   root: MapNode,
   mapPath: string[],
-  presenceForOpId: string | undefined,
+  presenceForOpId: TimestampStr | undefined,
   createIfMissing: boolean,
 ): MapNode | undefined {
   let node: MapNode = root
@@ -32,30 +31,25 @@ export function descendMap(
         `type conflict at ${key}: mapT namespace occupied by ${next.kind}`,
       )
     }
-    node = next as MapNode
+    node = next
   }
   return node
 }
 
-/** Add presence at a map node for a specific logical key under the given op id. */
 export function addPresenceForKey(
   mapNode: MapNode,
   plainKey: string,
-  opIdStr: string,
+  opIdStr: TimestampStr,
 ): void {
   const existing = mapNode.presence.get(plainKey)
   if (existing) existing.add(opIdStr)
   else mapNode.presence.set(plainKey, new Set([opIdStr]))
 }
 
-/**
- * Causally clear everything at a key (register/map/list) inside a map node,
- * subtracting only deps. Preserves concurrent updates.
- */
 export function clearKeyCausally(
   parent: MapNode,
   plainKey: string,
-  deps: Set<string>,
+  deps: Set<TimestampStr>,
 ): void {
   const pres = parent.presence.get(plainKey)
   if (pres) for (const d of deps) pres.delete(d)
@@ -73,39 +67,50 @@ export function clearKeyCausally(
   if (list && list.kind === 'list') clearListCausally(list, deps)
 }
 
-export function clearRegisterCausally(reg: RegNode, deps: Set<string>): void {
+export function clearRegisterCausally(
+  reg: RegNode,
+  deps: Set<TimestampStr>,
+): void {
   for (const d of deps) reg.values.delete(d)
 }
 
-export function clearMapCausally(map: MapNode, deps: Set<string>): void {
+export function clearMapCausally(map: MapNode, deps: Set<TimestampStr>): void {
   for (const [plainKey, pres] of map.presence.entries()) {
     for (const d of deps) pres.delete(d)
     clearKeyCausally(map, plainKey, deps)
   }
 }
 
-export function clearListCausally(list: ListNode, deps: Set<string>): void {
+export function* iterateListIds(list: ListNode): IterableIterator<ElemId> {
   let cur = list.next.get(LIST_HEAD)
   while (cur && cur !== LIST_TAIL) {
-    const pres = list.presence.get(cur)
-    if (pres) for (const d of deps) pres.delete(d)
-    const container = list.elements.get(cur)
-    if (container) clearElementContainerCausally(container, deps)
-    cur = list.next.get(cur)
+    const id = cur
+    yield id
+    cur = list.next.get(id)
   }
 }
 
-/** Clear element payloads (reg/map/list) by subtracting deps. */
+export function clearListCausally(
+  list: ListNode,
+  deps: Set<TimestampStr>,
+): void {
+  for (const id of iterateListIds(list)) {
+    const pres = list.presence.get(id)
+    if (pres) for (const d of deps) pres.delete(d)
+    const container = list.elements.get(id)
+    if (container) clearElementContainerCausally(container, deps)
+  }
+}
+
 export function clearElementContainerCausally(
   container: ElemContainer,
-  deps: Set<string>,
+  deps: Set<TimestampStr>,
 ): void {
   if (container.reg) clearRegisterCausally(container.reg, deps)
   if (container.map) clearMapCausally(container.map, deps)
   if (container.list) clearListCausally(container.list, deps)
 }
 
-/** Fetch a list node by path+key without creating it. */
 export function getListNodeAt(
   root: MapNode,
   mapPath: string[],
