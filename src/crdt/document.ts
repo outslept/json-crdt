@@ -9,6 +9,7 @@ import {
   assertOpDeleteKey,
   assertOpDeleteListElement,
   assertOpInsertListPrimitive,
+  fromWire,
   type JsonPrimitive,
   type OpAssignElemEmptyList,
   type OpAssignElemEmptyMap,
@@ -21,6 +22,7 @@ import {
   type OpDeleteListElement,
   type Operation,
   type OpInsertListPrimitive,
+  type WireOperation,
 } from './op.js'
 import {
   cmpTimestampStr,
@@ -69,6 +71,9 @@ export class JsonCrdtDocument {
   private readonly processed: Set<string>
   private readonly root: MapNode
 
+  private readonly pendingById: Map<string, Operation> = new Map()
+  private draining = false
+
   constructor(replicaId: ReplicaID, counterStart = 0) {
     this.replicaId = replicaId
     this.clock = new LamportClock(replicaId, counterStart)
@@ -79,20 +84,29 @@ export class JsonCrdtDocument {
   getReplicaId(): ReplicaID {
     return this.replicaId
   }
+
   getClock(): LamportClock {
     return this.clock
   }
+
   getProcessedIds(): ReadonlySet<string> {
     return this.processed
+  }
+
+  receiveWire(wire: WireOperation): void {
+    const op = fromWire(wire)
+    this.apply(op)
   }
 
   apply(op: Operation): void {
     const idStr = tsToString(op.id)
     if (this.processed.has(idStr)) return
+    if (this.pendingById.has(idStr)) return
 
     for (const dep of op.deps) {
       if (!this.processed.has(dep)) {
-        throw new Error(`unsatisfied dependency ${dep} for op ${idStr}`)
+        this.pendingById.set(idStr, op)
+        return
       }
     }
 
@@ -145,6 +159,139 @@ export class JsonCrdtDocument {
 
     this.processed.add(idStr)
     this.clock.observe(op.id)
+
+    // Attempt to drain any now-ready pending ops
+    if (!this.draining) this.drainPending()
+  }
+
+  private drainPending(): void {
+    this.draining = true
+    try {
+      let progressed = true
+      while (progressed) {
+        progressed = false
+        const readyIds: string[] = []
+        for (const [pid, pop] of this.pendingById) {
+          let ready = true
+          for (const dep of pop.deps) {
+            if (!this.processed.has(dep)) {
+              ready = false
+              break
+            }
+          }
+          if (ready) readyIds.push(pid)
+        }
+        if (readyIds.length === 0) break
+        progressed = true
+        for (const pid of readyIds) {
+          const pop = this.pendingById.get(pid)
+          if (!pop) continue
+          this.pendingById.delete(pid)
+          this.apply(pop)
+        }
+      }
+    } finally {
+      this.draining = false
+    }
+  }
+
+  applyLocalAssign(cursor: Cursor, value: JsonPrimitive): Operation {
+    return this.applyLocalAssignPrimitive(cursor, value)
+  }
+
+  applyLocalAssignPrimitive(cursor: Cursor, value: JsonPrimitive): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    const op: Operation = {
+      id,
+      deps,
+      cursor,
+      mut: { kind: 'assign_primitive', value },
+    }
+    this.apply(op)
+    return op
+  }
+
+  applyLocalAssignEmptyMap(cursor: Cursor): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    const op: Operation = {
+      id,
+      deps,
+      cursor,
+      mut: { kind: 'assign_empty_map' },
+    }
+    this.apply(op)
+    return op
+  }
+
+  applyLocalAssignEmptyList(cursor: Cursor): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    const op: Operation = {
+      id,
+      deps,
+      cursor,
+      mut: { kind: 'assign_empty_list' },
+    }
+    this.apply(op)
+    return op
+  }
+
+  applyLocalInsertListPrimitiveAtHead(
+    cursorToList: Cursor,
+    value: JsonPrimitive,
+  ): Operation {
+    return this.applyLocalInsertListPrimitiveAfter(
+      cursorToList,
+      LIST_HEAD,
+      value,
+    )
+  }
+
+  applyLocalInsertListPrimitiveAfter(
+    cursorToList: Cursor,
+    afterElementId: string,
+    value: JsonPrimitive,
+  ): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    if (afterElementId !== LIST_HEAD) {
+      deps.add(afterElementId)
+    }
+    const op: Operation = {
+      id,
+      deps,
+      cursor: cursorToList,
+      mut: { kind: 'insert_list_primitive', after: afterElementId, value },
+    }
+    this.apply(op)
+    return op
+  }
+
+  applyLocalDeleteKey(cursor: Cursor): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    const op: Operation = { id, deps, cursor, mut: { kind: 'delete_key' } }
+    this.apply(op)
+    return op
+  }
+
+  applyLocalDeleteListElement(
+    cursorToList: Cursor,
+    elementId: string,
+  ): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    deps.add(elementId) // depend on the insert of this element
+    const op: Operation = {
+      id,
+      deps,
+      cursor: cursorToList,
+      mut: { kind: 'delete_list_element', elementId },
+    }
+    this.apply(op)
+    return op
   }
 
   applyLocalAssignElemPrimitive(
@@ -250,7 +397,9 @@ export class JsonCrdtDocument {
     let cur = list.next.get(LIST_HEAD)
     while (cur && cur !== LIST_TAIL) {
       const pres = list.presence.get(cur)
-      if (pres && pres.size > 0) ids.push(cur)
+      if (pres && pres.size > 0) {
+        ids.push(cur)
+      }
       cur = list.next.get(cur)
     }
     return ids
@@ -424,7 +573,6 @@ export class JsonCrdtDocument {
     const idStr = tsToString(op.id)
     const list = this.getListNode(op.cursor.mapPath, op.cursor.key)
     if (!list) throw new Error('list does not exist for assign_elem_primitive')
-
     if (!list.next.has(op.mut.elementId)) {
       throw new Error(
         `unknown element ${op.mut.elementId} at list ${op.cursor.key}`,
@@ -436,7 +584,6 @@ export class JsonCrdtDocument {
     else list.presence.set(op.mut.elementId, new Set([idStr]))
 
     const container: ElemContainer = list.elements.get(op.mut.elementId) ?? {}
-
     if (!container.reg) container.reg = { kind: 'reg', values: new Map() }
     for (const d of op.deps) container.reg.values.delete(d)
     container.reg.values.set(idStr, op.mut.value)
@@ -447,10 +594,11 @@ export class JsonCrdtDocument {
     const idStr = tsToString(op.id)
     const list = this.getListNode(op.cursor.mapPath, op.cursor.key)
     if (!list) throw new Error('list does not exist for assign_elem_empty_map')
-    if (!list.next.has(op.mut.elementId))
+    if (!list.next.has(op.mut.elementId)) {
       throw new Error(
         `unknown element ${op.mut.elementId} at list ${op.cursor.key}`,
       )
+    }
 
     const elPres = list.presence.get(op.mut.elementId)
     if (elPres) elPres.add(idStr)
@@ -459,9 +607,7 @@ export class JsonCrdtDocument {
     const container: ElemContainer = list.elements.get(op.mut.elementId) ?? {}
     if (!container.map)
       container.map = { kind: 'map', entries: new Map(), presence: new Map() }
-
     this.clearElemContainer(container, op.deps)
-
     if (!container.map)
       container.map = { kind: 'map', entries: new Map(), presence: new Map() }
     list.elements.set(op.mut.elementId, container)
@@ -471,10 +617,11 @@ export class JsonCrdtDocument {
     const idStr = tsToString(op.id)
     const list = this.getListNode(op.cursor.mapPath, op.cursor.key)
     if (!list) throw new Error('list does not exist for assign_elem_empty_list')
-    if (!list.next.has(op.mut.elementId))
+    if (!list.next.has(op.mut.elementId)) {
       throw new Error(
         `unknown element ${op.mut.elementId} at list ${op.cursor.key}`,
       )
+    }
 
     const elPres = list.presence.get(op.mut.elementId)
     if (elPres) elPres.add(idStr)
@@ -510,10 +657,11 @@ export class JsonCrdtDocument {
     const list = this.getListNode(op.cursor.mapPath, op.cursor.key)
     if (!list)
       throw new Error('list does not exist for assign_elem_map_primitive')
-    if (!list.next.has(op.mut.elementId))
+    if (!list.next.has(op.mut.elementId)) {
       throw new Error(
         `unknown element ${op.mut.elementId} at list ${op.cursor.key}`,
       )
+    }
 
     const elPres = list.presence.get(op.mut.elementId)
     if (elPres) elPres.add(idStr)
@@ -527,8 +675,8 @@ export class JsonCrdtDocument {
     if (!parent) throw new Error('invalid element map path')
 
     this.clearAtKey(parent, op.mut.key, op.deps)
-
     this.addPresence(parent, op.mut.key, idStr)
+
     const regKey = ns('regT', op.mut.key)
     let reg = parent.entries.get(regKey)
     if (!reg) {
@@ -590,7 +738,9 @@ export class JsonCrdtDocument {
     deps: Set<string>,
   ): void {
     const pres = parent.presence.get(plainKey)
-    if (pres) for (const d of deps) pres.delete(d)
+    if (pres) {
+      for (const d of deps) pres.delete(d)
+    }
 
     const regKey = ns('regT', plainKey)
     const reg = parent.entries.get(regKey)

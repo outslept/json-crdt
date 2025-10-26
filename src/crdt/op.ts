@@ -129,3 +129,96 @@ export function assertOpAssignElemMapPrimitive(
   if (op.mut.kind !== 'assign_elem_map_primitive')
     throw new Error(`expected assign_elem_map_primitive, got ${op.mut.kind}`)
 }
+
+export type WireOperation = {
+  id: LamportTimestamp
+  deps: string[] // string-encoded op IDs
+  cursor: Cursor
+  mut:
+    | OpAssignPrimitive['mut']
+    | OpAssignEmptyMap['mut']
+    | OpAssignEmptyList['mut']
+    | OpInsertListPrimitive['mut']
+    | OpDeleteKey['mut']
+    | OpDeleteListElement['mut']
+    | OpAssignElemPrimitive['mut']
+    | OpAssignElemEmptyMap['mut']
+    | OpAssignElemEmptyList['mut']
+    | OpAssignElemMapPrimitive['mut']
+}
+
+export function toWire(op: Operation): WireOperation {
+  return {
+    id: op.id,
+    deps: [...op.deps],
+    cursor: { mapPath: [...op.cursor.mapPath], key: op.cursor.key },
+    mut: op.mut as WireOperation['mut'],
+  }
+}
+
+export function fromWire(w: WireOperation): Operation {
+  const base = {
+    id: w.id,
+    deps: new Set(w.deps),
+    cursor: { mapPath: [...w.cursor.mapPath], key: w.cursor.key } as Cursor,
+  }
+
+  switch (w.mut.kind) {
+    case 'assign_primitive':
+      return { ...base, mut: { kind: 'assign_primitive', value: w.mut.value } }
+    case 'assign_empty_map':
+      return { ...base, mut: { kind: 'assign_empty_map' } }
+    case 'assign_empty_list':
+      return { ...base, mut: { kind: 'assign_empty_list' } }
+    case 'insert_list_primitive':
+      return {
+        ...base,
+        mut: {
+          kind: 'insert_list_primitive',
+          after: w.mut.after,
+          value: w.mut.value,
+        },
+      }
+    case 'delete_key':
+      return { ...base, mut: { kind: 'delete_key' } }
+    case 'delete_list_element':
+      return {
+        ...base,
+        mut: { kind: 'delete_list_element', elementId: w.mut.elementId },
+      }
+    case 'assign_elem_primitive':
+      return {
+        ...base,
+        mut: {
+          kind: 'assign_elem_primitive',
+          elementId: w.mut.elementId,
+          value: w.mut.value,
+        },
+      }
+    case 'assign_elem_empty_map':
+      return {
+        ...base,
+        mut: { kind: 'assign_elem_empty_map', elementId: w.mut.elementId },
+      }
+    case 'assign_elem_empty_list':
+      return {
+        ...base,
+        mut: { kind: 'assign_elem_empty_list', elementId: w.mut.elementId },
+      }
+    case 'assign_elem_map_primitive':
+      return {
+        ...base,
+        mut: {
+          kind: 'assign_elem_map_primitive',
+          elementId: w.mut.elementId,
+          path: [...w.mut.path],
+          key: w.mut.key,
+          value: w.mut.value,
+        },
+      }
+    default: {
+      const _exhaustive: never = w.mut
+      return { ...base, mut: _exhaustive }
+    }
+  }
+}
