@@ -4,7 +4,9 @@ import type { LamportTimestamp } from './timestamp.js'
 export type JsonPrimitive = string | number | boolean | null
 
 export type Mutation =
-  | { kind: 'assign'; value: JsonPrimitive }
+  | { kind: 'assign_primitive'; value: JsonPrimitive }
+  | { kind: 'assign_empty_map' }
+  | { kind: 'assign_empty_list' }
   | { kind: 'delete' }
   | { kind: 'insert'; value: never }
 

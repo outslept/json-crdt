@@ -2,7 +2,7 @@ import { LamportClock, tsToString, type ReplicaID } from './timestamp.js'
 import type { Cursor } from './cursor.js'
 import type { JsonPrimitive, Mutation, Operation } from './op.js'
 
-type Node = MapNode | RegNode // todo(outslept): ListNode
+type Node = MapNode | RegNode | ListNode
 
 interface MapNode {
   kind: 'map'
@@ -14,6 +14,16 @@ interface RegNode {
   kind: 'reg'
   values: Map<string, JsonPrimitive> // opId -> primitive value
 }
+
+interface ListNode {
+  kind: 'list'
+  next: Map<string, string> // elementId -> next elementId; includes head -> ...
+  presence: Map<string, Set<string>> // elementId -> set of op ids asserting presence
+  elements: Map<string, Node> // elementId -> element payload node (map/reg/list)
+}
+
+const HEAD = '__head__'
+const TAIL = '__tail__'
 
 function ns(tag: 'mapT' | 'listT' | 'regT', key: string): string {
   return `${tag}:${key}`
@@ -48,9 +58,21 @@ export class JsonCrdtDocument {
     const idStr = tsToString(op.id)
     if (this.processed.has(idStr)) return
 
+    for (const dep of op.deps) {
+      if (!this.processed.has(dep)) {
+        throw new Error(`unsatisfied dependency ${dep} for op ${idStr}`)
+      }
+    }
+
     switch (op.mut.kind) {
-      case 'assign':
-        this.applyAssign(op)
+      case 'assign_primitive':
+        this.applyAssignPrimitive(op)
+        break
+      case 'assign_empty_map':
+        this.applyAssignEmptyMap(op)
+        break
+      case 'assign_empty_list':
+        this.applyAssignEmptyList(op)
         break
       case 'delete':
         throw new Error('todo')
@@ -67,9 +89,31 @@ export class JsonCrdtDocument {
   }
 
   applyLocalAssign(cursor: Cursor, value: JsonPrimitive): Operation {
+    return this.applyLocalAssignPrimitive(cursor, value)
+  }
+
+  applyLocalAssignPrimitive(cursor: Cursor, value: JsonPrimitive): Operation {
     const id = this.clock.tick()
     const deps = new Set(this.processed)
-    const mut: Mutation = { kind: 'assign', value }
+    const mut: Mutation = { kind: 'assign_primitive', value }
+    const op: Operation = { id, deps, cursor, mut }
+    this.apply(op)
+    return op
+  }
+
+  applyLocalAssignEmptyMap(cursor: Cursor): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    const mut: Mutation = { kind: 'assign_empty_map' }
+    const op: Operation = { id, deps, cursor, mut }
+    this.apply(op)
+    return op
+  }
+
+  applyLocalAssignEmptyList(cursor: Cursor): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    const mut: Mutation = { kind: 'assign_empty_list' }
     const op: Operation = { id, deps, cursor, mut }
     this.apply(op)
     return op
@@ -90,15 +134,19 @@ export class JsonCrdtDocument {
     for (const [plainKey, pres] of map.presence.entries()) {
       if (pres.size > 0) out.push(plainKey)
     }
-    return out.sort()
+    return out.toSorted()
   }
 
-  private applyAssign(op: Operation): void {
+  private applyAssignPrimitive(
+    op: Operation & { mut: { kind: 'assign_primitive'; value: JsonPrimitive } },
+  ): void {
     const idStr = tsToString(op.id)
     const parent = this.descendMap(op.cursor.mapPath, idStr)
     if (!parent) {
-      throw new Error('invalid cursor path for assign')
+      throw new Error('invalid cursor path for assign_primitive')
     }
+
+    this.clearAtKey(parent, op.cursor.key, op.deps)
 
     this.addPresence(parent, op.cursor.key, idStr)
 
@@ -119,7 +167,59 @@ export class JsonCrdtDocument {
       }
     }
 
-    reg.values.set(idStr, op.mut.value) // this will be fixed later
+    reg.values.set(idStr, op.mut.value)
+  }
+
+  private applyAssignEmptyMap(
+    op: Operation & { mut: { kind: 'assign_empty_map' } },
+  ): void {
+    const idStr = tsToString(op.id)
+    const parent = this.descendMap(op.cursor.mapPath, idStr)
+    if (!parent) {
+      throw new Error('invalid cursor path for assign_empty_map')
+    }
+
+    this.clearAtKey(parent, op.cursor.key, op.deps)
+
+    this.addPresence(parent, op.cursor.key, idStr)
+
+    const mapKey = ns('mapT', op.cursor.key)
+    let child = parent.entries.get(mapKey)
+    if (!child) {
+      child = { kind: 'map', entries: new Map(), presence: new Map() }
+      parent.entries.set(mapKey, child)
+    } else if (child.kind !== 'map') {
+      throw new Error(
+        `type conflict at key ${op.cursor.key}: mapT namespace occupied by ${child.kind}`,
+      )
+    }
+  }
+
+  private applyAssignEmptyList(
+    op: Operation & { mut: { kind: 'assign_empty_list' } },
+  ): void {
+    const idStr = tsToString(op.id)
+    const parent = this.descendMap(op.cursor.mapPath, idStr)
+    if (!parent) {
+      throw new Error('invalid cursor path for assign_empty_list')
+    }
+
+    this.clearAtKey(parent, op.cursor.key, op.deps)
+
+    this.addPresence(parent, op.cursor.key, idStr)
+
+    const listKey = ns('listT', op.cursor.key)
+    let child = parent.entries.get(listKey)
+    if (!child) {
+      const next = new Map<string, string>()
+      next.set(HEAD, TAIL)
+      child = { kind: 'list', next, presence: new Map(), elements: new Map() }
+      parent.entries.set(listKey, child)
+    } else if (child.kind !== 'list') {
+      throw new Error(
+        `type conflict at key ${op.cursor.key}: listT namespace occupied by ${child.kind}`,
+      )
+    }
   }
 
   private descendMap(
@@ -160,6 +260,75 @@ export class JsonCrdtDocument {
       existing.add(opIdStr)
     } else {
       mapNode.presence.set(plainKey, new Set([opIdStr]))
+    }
+  }
+
+  private clearAtKey(
+    parent: MapNode,
+    plainKey: string,
+    deps: Set<string>,
+  ): void {
+    const pres = parent.presence.get(plainKey)
+    if (pres) {
+      for (const d of deps) pres.delete(d)
+    }
+
+    const regKey = ns('regT', plainKey)
+    const reg = parent.entries.get(regKey)
+    if (reg && reg.kind === 'reg') {
+      this.clearReg(reg, deps)
+    }
+
+    const mapKey = ns('mapT', plainKey)
+    const map = parent.entries.get(mapKey)
+    if (map && map.kind === 'map') {
+      this.clearMap(map, deps)
+    }
+
+    const listKey = ns('listT', plainKey)
+    const list = parent.entries.get(listKey)
+    if (list && list.kind === 'list') {
+      this.clearList(list, deps)
+    }
+  }
+
+  private clearReg(reg: RegNode, deps: Set<string>): void {
+    for (const d of deps) {
+      if (reg.values.has(d)) reg.values.delete(d)
+    }
+  }
+
+  private clearMap(map: MapNode, deps: Set<string>): void {
+    for (const [plainKey, pres] of map.presence.entries()) {
+      for (const d of deps) pres.delete(d)
+      this.clearAtKey(map, plainKey, deps)
+    }
+  }
+
+  private clearList(list: ListNode, deps: Set<string>): void {
+    let cur = list.next.get(HEAD)
+    while (cur && cur !== TAIL) {
+      const pres = list.presence.get(cur)
+      if (pres) {
+        for (const d of deps) pres.delete(d)
+      }
+      const elemNode = list.elements.get(cur)
+      if (elemNode) this.clearNode(elemNode, deps)
+      cur = list.next.get(cur)
+    }
+  }
+
+  private clearNode(node: Node, deps: Set<string>): void {
+    switch (node.kind) {
+      case 'reg':
+        this.clearReg(node, deps)
+        break
+      case 'map':
+        this.clearMap(node, deps)
+        break
+      case 'list':
+        this.clearList(node, deps)
+        break
     }
   }
 }
