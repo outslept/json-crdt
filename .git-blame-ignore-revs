@@ -1,0 +1,2 @@
+# Add commits that only reformat code (prettier/eslint --fix) to reduce blame noise
+f1787b936592c10a216b0d8dd4d4b4c00506d398
