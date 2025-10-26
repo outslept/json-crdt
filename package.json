@@ -4,6 +4,19 @@
   "packageManager": "pnpm@10.15.0",
   "type": "module",
   "zshy": "src/index.ts",
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.cts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.cts",
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "zshy",
     "lint": "eslint .",
@@ -15,23 +28,11 @@
     "@prettier/plugin-oxc": "^0.0.4",
     "@sxzz/eslint-config": "^7.2.7",
     "@types/node": "^24.9.1",
+    "@vitest/coverage-v8": "4.0.3",
     "eslint": "^9.38.0",
     "prettier": "^3.6.2",
     "typescript": "^5.9.3",
     "vitest": "^4.0.3",
     "zshy": "^0.4.4"
-  },
-  "files": [
-    "dist"
-  ],
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.js",
-  "types": "./dist/index.d.cts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.cts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
-    }
   }
 }
