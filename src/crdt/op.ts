@@ -7,8 +7,9 @@ export type Mutation =
   | { kind: 'assign_primitive'; value: JsonPrimitive }
   | { kind: 'assign_empty_map' }
   | { kind: 'assign_empty_list' }
+  // list operations (payloads start with primitives)
+  | { kind: 'insert_list_primitive'; after: string; value: JsonPrimitive }
   | { kind: 'delete' }
-  | { kind: 'insert'; value: never }
 
 export interface Operation {
   id: LamportTimestamp

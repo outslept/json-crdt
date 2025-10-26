@@ -1,4 +1,9 @@
-import { LamportClock, tsToString, type ReplicaID } from './timestamp.js'
+import {
+  cmpTimestampStr,
+  LamportClock,
+  tsToString,
+  type ReplicaID,
+} from './timestamp.js'
 import type { Cursor } from './cursor.js'
 import type { JsonPrimitive, Mutation, Operation } from './op.js'
 
@@ -22,8 +27,8 @@ interface ListNode {
   elements: Map<string, Node> // elementId -> element payload node (map/reg/list)
 }
 
-const HEAD = '__head__'
-const TAIL = '__tail__'
+const LIST_HEAD = '__head__'
+const LIST_TAIL = '__tail__'
 
 function ns(tag: 'mapT' | 'listT' | 'regT', key: string): string {
   return `${tag}:${key}`
@@ -74,9 +79,10 @@ export class JsonCrdtDocument {
       case 'assign_empty_list':
         this.applyAssignEmptyList(op)
         break
+      case 'insert_list_primitive':
+        this.applyInsertListPrimitive(op)
+        break
       case 'delete':
-        throw new Error('todo')
-      case 'insert':
         throw new Error('todo')
       default: {
         const _exhaustive: never = op.mut
@@ -119,6 +125,37 @@ export class JsonCrdtDocument {
     return op
   }
 
+  applyLocalInsertListPrimitiveAtHead(
+    cursorToList: Cursor,
+    value: JsonPrimitive,
+  ): Operation {
+    return this.applyLocalInsertListPrimitiveAfter(
+      cursorToList,
+      LIST_HEAD,
+      value,
+    )
+  }
+
+  applyLocalInsertListPrimitiveAfter(
+    cursorToList: Cursor,
+    afterElementId: string,
+    value: JsonPrimitive,
+  ): Operation {
+    const id = this.clock.tick()
+    const deps = new Set(this.processed)
+    if (afterElementId !== LIST_HEAD) {
+      deps.add(afterElementId)
+    }
+    const mut: Mutation = {
+      kind: 'insert_list_primitive',
+      after: afterElementId,
+      value,
+    }
+    const op: Operation = { id, deps, cursor: cursorToList, mut }
+    this.apply(op)
+    return op
+  }
+
   readRegisterValues(cursor: Cursor): Set<JsonPrimitive> | undefined {
     const parent = this.descendMap(cursor.mapPath, /*presenceFor=*/ undefined)
     if (!parent) return undefined
@@ -135,6 +172,44 @@ export class JsonCrdtDocument {
       if (pres.size > 0) out.push(plainKey)
     }
     return out.toSorted()
+  }
+
+  listElementIds(mapPath: string[], listKey: string): string[] {
+    const list = this.getListNode(mapPath, listKey)
+    if (!list) return []
+    const ids: string[] = []
+    let cur = list.next.get(LIST_HEAD)
+    while (cur && cur !== LIST_TAIL) {
+      const pres = list.presence.get(cur)
+      if (pres && pres.size > 0) {
+        ids.push(cur)
+      }
+      cur = list.next.get(cur)
+    }
+    return ids
+  }
+
+  readListPrimitiveSets(
+    mapPath: string[],
+    listKey: string,
+  ): Array<Set<JsonPrimitive>> {
+    const list = this.getListNode(mapPath, listKey)
+    if (!list) return []
+    const out: Array<Set<JsonPrimitive>> = []
+    let cur = list.next.get(LIST_HEAD)
+    while (cur && cur !== LIST_TAIL) {
+      const pres = list.presence.get(cur)
+      if (pres && pres.size > 0) {
+        const payload = list.elements.get(cur)
+        if (payload && payload.kind === 'reg') {
+          out.push(new Set(payload.values.values()))
+        } else {
+          out.push(new Set())
+        }
+      }
+      cur = list.next.get(cur)
+    }
+    return out
   }
 
   private applyAssignPrimitive(
@@ -212,7 +287,7 @@ export class JsonCrdtDocument {
     let child = parent.entries.get(listKey)
     if (!child) {
       const next = new Map<string, string>()
-      next.set(HEAD, TAIL)
+      next.set(LIST_HEAD, LIST_TAIL)
       child = { kind: 'list', next, presence: new Map(), elements: new Map() }
       parent.entries.set(listKey, child)
     } else if (child.kind !== 'list') {
@@ -220,6 +295,59 @@ export class JsonCrdtDocument {
         `type conflict at key ${op.cursor.key}: listT namespace occupied by ${child.kind}`,
       )
     }
+  }
+
+  private applyInsertListPrimitive(
+    op: Operation & {
+      mut: {
+        kind: 'insert_list_primitive'
+        after: string
+        value: JsonPrimitive
+      }
+    },
+  ): void {
+    const idStr = tsToString(op.id)
+    const parent = this.descendMap(op.cursor.mapPath, idStr)
+    if (!parent)
+      throw new Error('invalid cursor path for insert_list_primitive')
+
+    const listKey = ns('listT', op.cursor.key)
+    const list = parent.entries.get(listKey)
+    if (!list || list.kind !== 'list') {
+      throw new Error(
+        `list does not exist at key ${op.cursor.key}; assign_empty_list before inserting`,
+      )
+    }
+
+    const prev = op.mut.after === LIST_HEAD ? LIST_HEAD : op.mut.after
+    if (prev !== LIST_HEAD && !list.next.has(prev)) {
+      throw new Error(
+        `unknown predecessor element ${prev} for list ${op.cursor.key}`,
+      )
+    }
+
+    let at = prev
+    let next = list.next.get(at)
+    if (!next) {
+      next = LIST_TAIL
+    }
+    while (next !== LIST_TAIL && cmpTimestampStr(idStr, next) < 0) {
+      at = next
+      next = list.next.get(at) ?? LIST_TAIL
+    }
+
+    list.next.set(at, idStr)
+    list.next.set(idStr, next)
+
+    const pres = list.presence.get(idStr)
+    if (pres) pres.add(idStr)
+    else list.presence.set(idStr, new Set([idStr]))
+
+    const payload: RegNode = {
+      kind: 'reg',
+      values: new Map<string, JsonPrimitive>([[idStr, op.mut.value]]),
+    }
+    list.elements.set(idStr, payload)
   }
 
   private descendMap(
@@ -306,8 +434,8 @@ export class JsonCrdtDocument {
   }
 
   private clearList(list: ListNode, deps: Set<string>): void {
-    let cur = list.next.get(HEAD)
-    while (cur && cur !== TAIL) {
+    let cur = list.next.get(LIST_HEAD)
+    while (cur && cur !== LIST_TAIL) {
       const pres = list.presence.get(cur)
       if (pres) {
         for (const d of deps) pres.delete(d)
@@ -330,5 +458,16 @@ export class JsonCrdtDocument {
         this.clearList(node, deps)
         break
     }
+  }
+
+  private getListNode(
+    mapPath: string[],
+    listKey: string,
+  ): ListNode | undefined {
+    const parent = this.descendMap(mapPath, /*presenceFor=*/ undefined)
+    if (!parent) return undefined
+    const list = parent.entries.get(ns('listT', listKey))
+    if (!list || list.kind !== 'list') return undefined
+    return list
   }
 }

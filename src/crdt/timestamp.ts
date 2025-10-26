@@ -2,7 +2,7 @@ export type ReplicaID = string
 
 export interface LamportTimestamp {
   c: number // counter
-  p: ReplicaID
+  p: ReplicaID // replica id
 }
 
 export function cmpTimestamp(a: LamportTimestamp, b: LamportTimestamp): number {
@@ -15,6 +15,21 @@ export function cmpTimestamp(a: LamportTimestamp, b: LamportTimestamp): number {
 
 export function tsToString(ts: LamportTimestamp): string {
   return `${ts.c}:${ts.p}`
+}
+
+export function tsFromString(s: string): LamportTimestamp {
+  const i = s.indexOf(':')
+  if (i === -1) throw new Error(`invalid Lamport timestamp string: "${s}"`)
+  const cPart = s.slice(0, i)
+  const pPart = s.slice(i + 1)
+  const c = Number(cPart)
+  if (!Number.isFinite(c))
+    throw new Error(`invalid Lamport counter: "${cPart}"`)
+  return { c, p: pPart }
+}
+
+export function cmpTimestampStr(a: string, b: string): number {
+  return cmpTimestamp(tsFromString(a), tsFromString(b))
 }
 
 export class LamportClock {
