@@ -27,7 +27,7 @@
   "devDependencies": {
     "@prettier/plugin-oxc": "^0.0.4",
     "@sxzz/eslint-config": "^7.2.7",
-    "@types/node": "^24.9.1",
+    "@types/node": "^24.10.1",
     "@vitest/coverage-v8": "4.0.3",
     "eslint": "^9.38.0",
     "prettier": "^3.6.2",
