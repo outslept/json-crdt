@@ -25,7 +25,7 @@
     "format:fix": "prettier . --fix"
   },
   "devDependencies": {
-    "@prettier/plugin-oxc": "^0.0.4",
+    "@prettier/plugin-oxc": "^0.1.2",
     "@sxzz/eslint-config": "^7.2.7",
     "@types/node": "^24.9.1",
     "@vitest/coverage-v8": "4.0.3",
