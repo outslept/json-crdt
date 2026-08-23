@@ -3,7 +3,6 @@
   "version": "0.0.0",
   "packageManager": "pnpm@10.15.0",
   "type": "module",
-  "zshy": "src/index.ts",
   "files": [
     "dist"
   ],
@@ -18,21 +17,18 @@
     }
   },
   "scripts": {
-    "build": "zshy",
-    "lint": "eslint .",
-    "lint:fix": "eslint . --fix",
-    "format:check": "prettier . --check",
-    "format:fix": "prettier . --fix"
+    "build": "tsc",
+    "lint": "oxlint .",
+    "lint:fix": "oxlint . --fix",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check"
   },
   "devDependencies": {
-    "@prettier/plugin-oxc": "^0.0.4",
-    "@sxzz/eslint-config": "^7.2.7",
     "@types/node": "^24.9.1",
     "@vitest/coverage-v8": "4.0.3",
-    "eslint": "^9.38.0",
-    "prettier": "^3.6.2",
+    "oxfmt": "^0.64.0",
+    "oxlint": "^1.79.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.3",
-    "zshy": "^0.4.4"
+    "vitest": "^4.0.3"
   }
 }
