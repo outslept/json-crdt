@@ -48,7 +48,7 @@ export class LamportClock {
   }
 
   tick(seenExternalCounter?: number): LamportTimestamp {
-    if (typeof seenExternalCounter === 'number') {
+    if (seenExternalCounter !== undefined) {
       this.counter = Math.max(this.counter, seenExternalCounter)
     }
     this.counter += 1
