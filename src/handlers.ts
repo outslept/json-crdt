@@ -138,8 +138,7 @@ export function handleInsertListPrimitive(
     )
   }
 
-  const prev: ListNextKey =
-    op.mut.after === LIST_HEAD ? LIST_HEAD : op.mut.after
+  const prev: ListNextKey = op.mut.after
   if (prev !== LIST_HEAD && !list.next.has(prev)) {
     throw new Error(
       `unknown predecessor element ${prev} for list ${op.cursor.key}`,
@@ -233,8 +232,6 @@ export function handleAssignElemEmptyMap(
   if (!container.map)
     container.map = { kind: 'map', entries: new Map(), presence: new Map() }
   clearElementContainerCausally(container, op.deps)
-  if (!container.map)
-    container.map = { kind: 'map', entries: new Map(), presence: new Map() }
   list.elements.set(op.mut.elementId, container)
 }
 
@@ -267,16 +264,6 @@ export function handleAssignElemEmptyList(
     }
   }
   clearElementContainerCausally(container, op.deps)
-  if (!container.list) {
-    const next = new Map<ListNextKey, ListNextVal>()
-    next.set(LIST_HEAD, LIST_TAIL)
-    container.list = {
-      kind: 'list',
-      next,
-      presence: new Map(),
-      elements: new Map(),
-    }
-  }
   list.elements.set(op.mut.elementId, container)
 }
 
@@ -359,8 +346,7 @@ export function handleInsertElemListPrimitive(
   }
   const inner = container.list
 
-  const prev: ListNextKey =
-    op.mut.after === LIST_HEAD ? LIST_HEAD : op.mut.after
+  const prev: ListNextKey = op.mut.after
   if (prev !== LIST_HEAD && !inner.next.has(prev))
     throw new Error(`unknown inner predecessor ${prev}`)
   let at: ListNextKey = prev
