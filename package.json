@@ -1,7 +1,7 @@
 {
   "name": "json-crdt",
   "version": "0.0.0",
-  "packageManager": "pnpm@10.15.0",
+  "packageManager": "pnpm@11.23.0",
   "type": "module",
   "files": [
     "dist"
@@ -24,11 +24,11 @@
     "fmt:check": "oxfmt --check"
   },
   "devDependencies": {
-    "@types/node": "^24.9.1",
+    "@types/node": "^26.2.0",
     "@vitest/coverage-v8": "4.0.3",
     "oxfmt": "^0.64.0",
     "oxlint": "^1.79.0",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.3"
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
   }
 }
